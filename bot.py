@@ -510,11 +510,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = query.from_user.id
             
             try:
-                if not sheet:
+                current_sheet = get_sheet()
+                if not current_sheet:
                     await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
                     return
                 
-                records = sheet.get_all_records()
+                records = current_sheet.get_all_records()
             except Exception as e:
                 logger.error(f"Ошибка получения записей из таблицы: {e}")
                 await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
@@ -662,7 +663,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Ошибка получения курса. Попробуйте позже.")
                 return
             
-            rub = int(amount * rate * 1.03)
+            rub = int(amount * rate * 1.11)
             order_number = generate_order()
             
             if not order_number:
@@ -698,7 +699,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Сервис: <b>{service_name}</b>\n"
                 f"Тариф: <b>{tariff_name}</b>\n"
                 f"Стоимость: <b>{fmt(amount)} KZT</b>\n"
-                f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (3% комиссия)\n\n"
+                f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (11% комиссия)\n\n"
                 f"<i>Нажимая «Продолжить», вы подтверждаете ознакомление и полное согласие с условиями "
                 f"<a href='https://telegra.ph/Publichnaya-oferta-servisa-PayUse-03-16'>публичной оферты</a> и "
                 f"<a href='https://telegra.ph/Politika-konfidencialnosti-PayUse-03-16'>политикой конфиденциальности</a>.</i>",
@@ -849,12 +850,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💳 Оплата через ЮMoney\n\n"
                 f"📦 Заказ: <b>{order_number}</b>\n"
                 f"💰 К оплате: <b>{fmt(amount_rub)} ₽</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📲 <b>Как оплатить:</b>\n"
                 f"1. Нажмите кнопку <b>«Перейти к оплате»</b>\n"
                 f"2. Оплатите на сайте ЮMoney\n"
-                f"3. Вернитесь сюда — статус обновится автоматически\n\n"
-                f"⚠️ Не меняйте сумму — иначе заказ не определится!",
+                f"3. Сделайте скриншот подтверждения\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"⚠️ Не меняйте сумму — иначе заказ не определится!\n\n"
+                f"После оплаты нажмите «✅ Я оплатил» и отправьте подтверждение.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💳 Перейти к оплате", url=pay_url)],
+                    [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_yoomoney_{order_number}")],
                     [InlineKeyboardButton("⬅️ Назад к способам оплаты", callback_data="back_to_payment")]
                 ]),
                 parse_mode="HTML"
@@ -911,14 +917,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"1. Откройте приложение <b>Bybit</b>\n"
                 f"2. Перейдите в раздел <b>Перевод</b>\n"
                 f"3. Введите UID: <code>{BYBIT_UID}</code>\n"
-                f"4. Сумма: <b>{amount_usdt} USDT</b>\n"
-                f"5. В комментарии: <code>{order_number}</code>\n\n"
+                f"4. Сумма: <b>{amount_usdt} USDT</b>\n\n"
                 f"📲 <b>Способ 2: TRC20 (любой кошелёк)</b>\n"
                 f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
                 f"Сеть: <b>TRON (TRC20)</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"⚠️ <b>Важно:</b> укажите номер заказа в комментарии!\n\n"
-                f"После перевода нажмите «✅ Я оплатил».",
+                f"После перевода нажмите «✅ Я оплатил» и отправьте скриншот подтверждения.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
                     [InlineKeyboardButton("⬅️ Назад к способам оплаты", callback_data="back_to_payment")]
@@ -976,6 +980,54 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Клиент {user_id} подтвердил крипто-оплату {order_number}")
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа о крипто-оплате: {e}")
+
+        # === ПОДТВЕРЖДЕНИЕ ЮMONEY-ОПЛАТЫ ===
+        elif query.data.startswith("paid_yoomoney_"):
+            order_number = query.data.replace("paid_yoomoney_", "")
+            user_id = query.from_user.id
+            order = context.user_data.get("order")
+            amount_rub = order["rub"] if order else 0
+
+            await query.edit_message_text(
+                f"⏳ Заявка на проверку отправлена!\n\n"
+                f"Заказ: <b>{order_number}</b>\n"
+                f"Сумма: <b>{fmt(amount_rub)} ₽</b>\n\n"
+                f"📸 <b>Отправьте скриншот подтверждения оплаты</b> менеджеру, чтобы он сменил статус вашей заявки.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Отправить подтверждение", url=f"tg://user?id={ADMIN_ID}")]
+                ]),
+                parse_mode="HTML"
+            )
+
+            # Уведомляем админа
+            try:
+                service = order["service"] if order else "N/A"
+                tariff = order["tariff"] if order else "N/A"
+
+                admin_keyboard = [
+                    [InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_set_status_{order_number}_paid")],
+                    [InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_set_status_{order_number}_cancelled")],
+                    [InlineKeyboardButton("💬 Написать клиенту", url=f"tg://user?id={user_id}")]
+                ]
+
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"💳 Клиент сообщил об оплате через ЮMoney!\n\n"
+                    f"<b>📦 Заказ:</b> {order_number}\n"
+                    f"<b>Сервис:</b> {service}\n"
+                    f"<b>Тариф:</b> {tariff}\n"
+                    f"<b>Сумма:</b> {fmt(amount_rub)} ₽\n\n"
+                    f"<b>👤 Клиент:</b>\n"
+                    f"Имя: {query.from_user.first_name or 'Неизвестно'}\n"
+                    f"Ник: @{query.from_user.username if query.from_user.username else 'нет'}\n"
+                    f"ID: <code>{user_id}</code>\n\n"
+                    f"⚠️ Проверьте поступление в ЮMoney и выберите действие:",
+                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
+                    parse_mode="HTML"
+                )
+                logger.info(f"Клиент {user_id} подтвердил ЮMoney-оплату {order_number}")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления админа о ЮMoney-оплате: {e}")
 
         # === ПОДТВЕРЖДЕНИЕ OZON-ОПЛАТЫ ===
         elif query.data.startswith("paid_ozon_"):
@@ -1444,7 +1496,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Ошибка получения курса. Попробуйте позже.")
                     return
                 
-                rub = int(amount * rate * 1.03)
+                rub = int(amount * rate * 1.11)
                 order_number = generate_order()
                 
                 if not order_number:
@@ -1476,7 +1528,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Сервис: {service_name}\n"
                     f"Тариф: {tariff_name}\n"
                     f"Стоимость: <b>{fmt(amount)} KZT</b>\n"
-                    f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (3% комиссия)\n\n"
+                    f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (11% комиссия)\n\n"
                     f"<i>Нажимая «Продолжить», вы подтверждаете ознакомление и полное согласие с условиями "
                     f"<a href='https://telegra.ph/Publichnaya-oferta-servisa-PayUse-03-16'>публичной оферты</a> и "
                     f"<a href='https://telegra.ph/Politika-konfidencialnosti-PayUse-03-16'>политикой конфиденциальности</a>.</i>",
