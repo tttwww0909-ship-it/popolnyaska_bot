@@ -24,6 +24,11 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "")
 YOOMONEY_SECRET = os.getenv("YOOMONEY_SECRET", "")
 
+# Платёжные реквизиты
+OZON_PAY_URL = os.getenv("OZON_PAY_URL", "")
+BYBIT_UID = os.getenv("BYBIT_UID", "")
+TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
+
 # Проверяем, что все переменные загружены
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не установлен в .env файле!")
@@ -865,7 +870,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             amount_rub = order["rub"]
-            ozon_url = "https://finance.ozon.ru/apps/sbp/ozonbankpay/019cf93b-7a74-7565-a856-94a71ba71b5f"
 
             await query.edit_message_text(
                 f"💳 Оплата через OZON банк\n\n"
@@ -880,7 +884,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💡 <b>Комиссия:</b> с OZON без комиссии / с других банков 1.9%\n\n"
                 f"После перевода нажмите «✅ Я оплатил» и отправьте подтверждение.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Перейти к оплате", url=ozon_url)],
+                    [InlineKeyboardButton("💳 Перейти к оплате", url=OZON_PAY_URL)],
                     [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_ozon_{order_number}")],
                     [InlineKeyboardButton("⬅️ Назад к способам оплаты", callback_data="back_to_payment")]
                 ]),
@@ -906,11 +910,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📲 <b>Способ 1: Bybit (перевод по UID)</b>\n"
                 f"1. Откройте приложение <b>Bybit</b>\n"
                 f"2. Перейдите в раздел <b>Перевод</b>\n"
-                f"3. Введите UID: <code>364399004</code>\n"
+                f"3. Введите UID: <code>{BYBIT_UID}</code>\n"
                 f"4. Сумма: <b>{amount_usdt} USDT</b>\n"
                 f"5. В комментарии: <code>{order_number}</code>\n\n"
                 f"📲 <b>Способ 2: TRC20 (любой кошелёк)</b>\n"
-                f"Адрес: <code>TP5du9Wv3DyuPFZ6n4KwCG8wJs2iUYLdcp</code>\n"
+                f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
                 f"Сеть: <b>TRON (TRC20)</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
                 f"⚠️ <b>Важно:</b> укажите номер заказа в комментарии!\n\n"
@@ -1035,8 +1039,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Доступные способы оплаты:\n"
                 "• 💳 ЮMoney — перевод на кошелёк\n"
                 "• 💳 OZON банк — без комиссии с OZON / 1.9% с других\n"
-                "• 💎 Крипта USDT — через Bybit (UID: <code>364399004</code>) "
-                "или TRC20: <code>TP5du9Wv3DyuPFZ6n4KwCG8wJs2iUYLdcp</code>\n\n"
+                f"• 💎 Крипта USDT — через Bybit (UID: <code>{BYBIT_UID}</code>) "
+                f"или TRC20: <code>{TRC20_ADDRESS}</code>\n\n"
                 "2️⃣ <b>Когда я получу доступ?</b>\n"
                 "После подтверждения оплаты — в течение 30 минут.\n\n"
                 "3️⃣ <b>Что если платёж не прошёл?</b>\n"
@@ -1177,6 +1181,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === АДМИН-ПАНЕЛЬ: ЗАКАЗЫ ===
         elif query.data == "admin_orders":
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
             try:
                 sheet = get_sheet()
                 if not sheet:
@@ -1218,6 +1225,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === АДМИН-ПАНЕЛЬ: СТАТИСТИКА ===
         elif query.data == "admin_stats":
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
             stats = db.get_stats()
             await query.edit_message_text(
                 "📊 Статистика\n\n"
@@ -1230,6 +1240,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === АДМИН-ПАНЕЛЬ: УПРАВЛЕНИЕ СТАТУСАМИ ===
         elif query.data == "admin_manage_orders":
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
             try:
                 sheet = get_sheet()
                 if not sheet:
@@ -1276,6 +1289,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === АДМИН: ВЫБОР НОВОГО СТАТУСА ===
         elif query.data.startswith("admin_select_order_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
             order_num = query.data.replace("admin_select_order_", "")
             
             # Получаем информацию о заказе из таблицы
@@ -1313,6 +1329,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === АДМИН: ПРИМЕНЕНИЕ НОВОГО СТАТУСА ===
         elif query.data.startswith("admin_set_status_"):
+            # ПРОВЕРКА БЕЗОПАСНОСТИ: только админ может менять статусы
+            if query.from_user.id != ADMIN_ID:
+                logger.warning(f"⚠️ Попытка изменения статуса от не-админа: {query.from_user.id}")
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
+            
             parts = query.data.replace("admin_set_status_", "").rsplit("_", 1)
             order_num = parts[0]
             new_status = parts[1]
@@ -1572,25 +1594,44 @@ async def yoomoney_webhook(request: web.Request) -> web.Response:
 
         logger.info(f"✅ ЮMoney платёж подтверждён: label={label}, amount={amount} ₽, operation_id={operation_id}")
 
+        # Автоматически обновляем статус заказа на "Оплачен"
+        if label:
+            order_number = label
+            update_order_status(order_number, ORDER_STATUSES["paid"])
+            logger.info(f"✅ Статус {order_number} автоматически изменён на 'Оплачен'")
+
         # Уведомляем через бота
         if _bot_app and label:
             order_number = label
-            try:
-                # Уведомление клиенту
-                order_data = ORDER_USER_MAP.get(order_number)
-                if order_data:
-                    user_id = order_data.get("user_id")
-                    if user_id:
-                        await _bot_app.bot.send_message(
-                            user_id,
-                            f"✅ Оплата через ЮMoney получена!\n\n"
-                            f"📦 Заказ: <b>{order_number}</b>\n"
-                            f"💰 Сумма: <b>{amount} ₽</b>\n\n"
-                            f"Менеджер активирует ваш заказ в ближайшее время.",
-                            parse_mode="HTML"
-                        )
-            except Exception as e:
-                logger.error(f"Ошибка отправки уведомления клиенту: {e}")
+            
+            # Получаем user_id из ORDER_USER_MAP или из Google Sheets
+            user_id = ORDER_USER_MAP.get(order_number)
+            if not user_id:
+                try:
+                    sheet = get_sheet()
+                    if sheet:
+                        values = sheet.get_all_values()
+                        for row in values[1:]:
+                            if len(row) >= 2 and row[0] == order_number:
+                                user_id = int(row[1])
+                                break
+                except Exception as e:
+                    logger.error(f"Ошибка получения user_id для ЮMoney: {e}")
+            
+            # Уведомление клиенту
+            if user_id:
+                try:
+                    await _bot_app.bot.send_message(
+                        user_id,
+                        f"✅ Оплата через ЮMoney получена!\n\n"
+                        f"📦 Заказ: <b>{order_number}</b>\n"
+                        f"💰 Сумма: <b>{amount} ₽</b>\n\n"
+                        f"Статус заказа автоматически изменён на «Оплачен».\n"
+                        f"Менеджер активирует ваш заказ в ближайшее время.",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления клиенту: {e}")
 
             # Уведомление админу
             try:
@@ -1601,7 +1642,7 @@ async def yoomoney_webhook(request: web.Request) -> web.Response:
                     f"💰 Сумма: <b>{amount} ₽</b>\n"
                     f"🆔 Operation ID: <code>{operation_id}</code>\n"
                     f"👤 Отправитель: {sender or 'Анонимно'}\n\n"
-                    f"✅ Смените статус заказа на «Оплачен».",
+                    f"✅ Статус автоматически изменён на «Оплачен».",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -1623,13 +1664,16 @@ async def start_webhook_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     logger.info("✅ ЮMoney webhook сервер запущен на порту 8080")
+    return runner
 
 
 if __name__ == "__main__":
     import asyncio
+    import signal
 
     app = ApplicationBuilder().token(TOKEN).build()
     _bot_app = app
+    _webhook_runner = None
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
@@ -1639,14 +1683,62 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)
 
+    async def shutdown(sig=None):
+        """Корректное завершение работы бота"""
+        if sig:
+            logger.info(f"Получен сигнал {sig.name}, завершаем работу...")
+        
+        # Останавливаем бота
+        try:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            logger.info("✅ Бот остановлен")
+        except Exception as e:
+            logger.error(f"Ошибка остановки бота: {e}")
+        
+        # Останавливаем webhook сервер
+        if _webhook_runner:
+            try:
+                await _webhook_runner.cleanup()
+                logger.info("✅ Webhook сервер остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка остановки webhook: {e}")
+        
+        # Очищаем память
+        cleanup_memory()
+        logger.info("✅ Завершение работы")
+
     async def main():
-        await start_webhook_server()
+        global _webhook_runner
+        
+        # Регистрируем обработчики сигналов (для Linux)
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
+        except NotImplementedError:
+            # Windows не поддерживает add_signal_handler
+            pass
+        
+        _webhook_runner = await start_webhook_server()
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         print("✅ Бот запущен!")
         logger.info("✅ Бот успешно запущен")
-        await asyncio.Event().wait()  # держим процесс живым
+        
+        try:
+            await asyncio.Event().wait()  # держим процесс живым
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await shutdown()
 
     print("✅ Бот запущен!")
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
