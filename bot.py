@@ -121,6 +121,46 @@ ORDER_LOCK = {}  # Защита от дублей: {order_number: True}
 AWAITING_SCREENSHOT = TimedDict(max_age_seconds=86400)  # user_id: order_number
 AWAITING_EMAIL = TimedDict(max_age_seconds=86400)  # user_id: order_number (ожидание почты Apple ID)
 
+# === АНТИСПАМ ===
+USER_LAST_ORDER = {}  # user_id: timestamp последнего заказа
+ORDER_COOLDOWN = 60  # Минимум 60 секунд между заказами
+MAX_ACTIVE_ORDERS = 3  # Максимум активных заказов на пользователя
+
+
+def check_spam(user_id: int) -> tuple[bool, str]:
+    """Проверка на спам. Возвращает (можно_создать, сообщение_ошибки)"""
+    now = time.time()
+    
+    # Проверка кулдауна
+    if user_id in USER_LAST_ORDER:
+        elapsed = now - USER_LAST_ORDER[user_id]
+        if elapsed < ORDER_COOLDOWN:
+            wait = int(ORDER_COOLDOWN - elapsed)
+            return False, f"⏳ Подождите {wait} сек. перед созданием нового заказа."
+    
+    # Проверка лимита активных заказов
+    try:
+        current_sheet = get_sheet()
+        if current_sheet:
+            records = current_sheet.get_all_records()
+            active_statuses = ["Новый", "Ожидание оплаты", "Оплачен", "В обработке"]
+            active_orders = [
+                r for r in records 
+                if str(r.get("ID", "")) == str(user_id) 
+                and r.get("Статус", "") in active_statuses
+            ]
+            if len(active_orders) >= MAX_ACTIVE_ORDERS:
+                return False, f"❌ У вас уже {len(active_orders)} активных заказов. Дождитесь их завершения."
+    except Exception as e:
+        logger.error(f"Ошибка проверки лимита заказов: {e}")
+    
+    return True, ""
+
+
+def mark_order_created(user_id: int):
+    """Отмечает время создания заказа"""
+    USER_LAST_ORDER[user_id] = time.time()
+
 
 # === GOOGLE SHEETS ===
 def get_sheet():
@@ -685,6 +725,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ПОСЛЕ ВЫБОРА СЕРВИСА — ПОКАЗЫВАЕМ ЗАЯВКУ ===
         # === ВЫБОР ТАРИФА APPLE ID ===
         elif query.data.startswith("apple_") and query.data in PRICES:
+            user = query.from_user
+            
+            # Проверка антиспам
+            can_create, spam_msg = check_spam(user.id)
+            if not can_create:
+                await query.answer(spam_msg, show_alert=True)
+                return
+            
             amount = PRICES[query.data]
             rate = get_rate()
             
@@ -699,7 +747,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
                 return
             
-            user = query.from_user
             tariff_name = f"{fmt(amount)} KZT"
 
             context.user_data["order"] = {
@@ -734,6 +781,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             order_number = order["number"]
+            user_id = order["user"].id
+            
+            # Проверка антиспам перед подтверждением
+            can_create, spam_msg = check_spam(user_id)
+            if not can_create:
+                await query.answer(spam_msg, show_alert=True)
+                return
             
             # Защита от дублей
             if order_number in ORDER_LOCK:
@@ -743,24 +797,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ORDER_LOCK[order_number] = True
             
             try:
-                user_id = order["user"].id
                 ORDER_USER_MAP[order_number] = user_id
-
-                now = time.time()
-
-                if user_id not in user_orders:
-                    user_orders[user_id] = []
-
-                user_orders[user_id] = [t for t in user_orders[user_id] if now - t < 1200]
-
-                if len(user_orders[user_id]) >= 3:
-                    await query.edit_message_text(
-                        "⚠️ Слишком много заявок.\n\nПопробуйте снова через 20 минут."
-                    )
-                    del ORDER_LOCK[order_number]
-                    return
-
-                user_orders[user_id].append(now)
 
                 # === ДОБАВЛЯЕМ В ТАБЛИЦУ ===
                 order_data = {
@@ -777,6 +814,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text("❌ Ошибка сохранения заказа. Попробуйте позже.")
                     del ORDER_LOCK[order_number]
                     return
+                
+                # Отмечаем создание заказа для антиспама
+                mark_order_created(user_id)
 
                 # === СОХРАНЯЕМ ИНФОРМАЦИЮ О ЗАКАЗЕ ===
                 ORDER_INFO_MAP[order_number] = {
@@ -1634,6 +1674,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(
                         "❌ Неверный диапазон.\n\nВведите сумму от 400 до 45 000 KZT:"
                     )
+                    return
+                
+                # Проверка антиспам
+                can_create, spam_msg = check_spam(user_id)
+                if not can_create:
+                    await update.message.reply_text(spam_msg)
                     return
 
                 rate = get_rate()
