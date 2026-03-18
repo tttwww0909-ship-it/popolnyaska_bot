@@ -864,37 +864,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Скриншот будет автоматически переслан менеджеру.",
                 parse_mode="HTML"
             )
-
-            # Уведомляем админа
-            try:
-                service = order["service"] if order else "N/A"
-                tariff = order["tariff"] if order else "N/A"
-
-                admin_keyboard = [
-                    [InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_set_status_{order_number}_paid")],
-                    [InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_set_status_{order_number}_cancelled")],
-                    [InlineKeyboardButton("✔️ Выполнен", callback_data=f"admin_set_status_{order_number}_completed")],
-                    [InlineKeyboardButton("💬 Написать клиенту", url=f"tg://user?id={user_id}")]
-                ]
-
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"💰 Клиент сообщил об оплате криптой!\n\n"
-                    f"<b>📦 Заказ:</b> {order_number}\n"
-                    f"<b>Сервис:</b> {service}\n"
-                    f"<b>Тариф:</b> {tariff}\n"
-                    f"<b>Сумма:</b> {amount_usdt} USDT\n\n"
-                    f"<b>👤 Клиент:</b>\n"
-                    f"Имя: {query.from_user.first_name or 'Неизвестно'}\n"
-                    f"Ник: @{query.from_user.username if query.from_user.username else 'нет'}\n"
-                    f"ID: <code>{user_id}</code>\n\n"
-                    f"⏳ Ожидается скриншот от клиента...",
-                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                    parse_mode="HTML"
-                )
-                logger.info(f"Клиент {user_id} подтвердил крипто-оплату {order_number}")
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа о крипто-оплате: {e}")
+            logger.info(f"Клиент {user_id} нажал 'Я оплатил' (крипто) для {order_number}")
 
         # === ПОДТВЕРЖДЕНИЕ ЮMONEY-ОПЛАТЫ ===
         elif query.data.startswith("paid_yoomoney_"):
@@ -914,37 +884,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Скриншот будет автоматически переслан менеджеру.",
                 parse_mode="HTML"
             )
-
-            # Уведомляем админа
-            try:
-                service = order["service"] if order else "N/A"
-                tariff = order["tariff"] if order else "N/A"
-
-                admin_keyboard = [
-                    [InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_set_status_{order_number}_paid")],
-                    [InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_set_status_{order_number}_cancelled")],
-                    [InlineKeyboardButton("✔️ Выполнен", callback_data=f"admin_set_status_{order_number}_completed")],
-                    [InlineKeyboardButton("💬 Написать клиенту", url=f"tg://user?id={user_id}")]
-                ]
-
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"💳 Клиент сообщил об оплате через ЮMoney!\n\n"
-                    f"<b>📦 Заказ:</b> {order_number}\n"
-                    f"<b>Сервис:</b> {service}\n"
-                    f"<b>Тариф:</b> {tariff}\n"
-                    f"<b>Сумма:</b> {fmt(amount_rub)} ₽\n\n"
-                    f"<b>👤 Клиент:</b>\n"
-                    f"Имя: {query.from_user.first_name or 'Неизвестно'}\n"
-                    f"Ник: @{query.from_user.username if query.from_user.username else 'нет'}\n"
-                    f"ID: <code>{user_id}</code>\n\n"
-                    f"⏳ Ожидается скриншот от клиента...",
-                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                    parse_mode="HTML"
-                )
-                logger.info(f"Клиент {user_id} подтвердил ЮMoney-оплату {order_number}")
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа о ЮMoney-оплате: {e}")
+            logger.info(f"Клиент {user_id} нажал 'Я оплатил' (ЮMoney) для {order_number}")
 
         # === ПОДТВЕРЖДЕНИЕ OZON-ОПЛАТЫ ===
         elif query.data.startswith("paid_ozon_"):
@@ -964,37 +904,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Скриншот будет автоматически переслан менеджеру.",
                 parse_mode="HTML"
             )
-
-            # Уведомляем админа
-            try:
-                service = order["service"] if order else "N/A"
-                tariff = order["tariff"] if order else "N/A"
-
-                admin_keyboard = [
-                    [InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_set_status_{order_number}_paid")],
-                    [InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_set_status_{order_number}_cancelled")],
-                    [InlineKeyboardButton("✔️ Выполнен", callback_data=f"admin_set_status_{order_number}_completed")],
-                    [InlineKeyboardButton("💬 Написать клиенту", url=f"tg://user?id={user_id}")]
-                ]
-
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"💳 Клиент сообщил об оплате через OZON банк!\n\n"
-                    f"<b>📦 Заказ:</b> {order_number}\n"
-                    f"<b>Сервис:</b> {service}\n"
-                    f"<b>Тариф:</b> {tariff}\n"
-                    f"<b>Сумма:</b> {fmt(amount_rub)} ₽\n\n"
-                    f"<b>👤 Клиент:</b>\n"
-                    f"Имя: {query.from_user.first_name or 'Неизвестно'}\n"
-                    f"Ник: @{query.from_user.username if query.from_user.username else 'нет'}\n"
-                    f"ID: <code>{user_id}</code>\n\n"
-                    f"⏳ Ожидается скриншот от клиента...",
-                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                    parse_mode="HTML"
-                )
-                logger.info(f"Клиент {user_id} подтвердил OZON-оплату {order_number}")
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа о OZON-оплате: {e}")
+            logger.info(f"Клиент {user_id} нажал 'Я оплатил' (OZON) для {order_number}")
 
         # === ПОМОЩЬ ===
         elif query.data == "help_payment":
