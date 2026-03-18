@@ -64,7 +64,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
 from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, PreCheckoutQueryHandler, ContextTypes, filters
 from oauth2client.service_account import ServiceAccountCredentials
@@ -441,14 +441,18 @@ def cleanup_memory():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
     try:
-        keyboard = [
-            [InlineKeyboardButton("🍎 Пополнить Apple ID", callback_data="apple_topup")],
-            [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")]
-        ]
+        # ReplyKeyboard под полем ввода
+        reply_keyboard = ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("🍎 Пополнить Apple ID")],
+                [KeyboardButton("📋 Мои заказы")]
+            ],
+            resize_keyboard=True
+        )
         await update.message.reply_text(
             "Добро пожаловать в Pay&Use! 🚀\n\n"
             "Пополнение Apple ID в Казахстане.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=reply_keyboard
         )
         logger.info(f"Пользователь {update.message.from_user.id} запустил бот")
     except Exception as e:
@@ -1364,10 +1368,66 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений"""
     user_id = update.message.from_user.id
+    text = update.message.text.strip()
 
     try:
+        # === ОБРАБОТКА КНОПОК REPLY KEYBOARD ===
+        if text == "🍎 Пополнить Apple ID":
+            keyboard = [
+                [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
+                [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
+                [InlineKeyboardButton("🍏 25 000 KZT", callback_data="apple_25000")],
+                [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")]
+            ]
+            await update.message.reply_text(
+                "🍎 Пополнение Apple ID\n\n"
+                "Выберите сумму пополнения:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        if text == "📋 Мои заказы":
+            try:
+                current_sheet = get_sheet()
+                if not current_sheet:
+                    await update.message.reply_text("⚠️ Ошибка доступа к таблице.")
+                    return
+                
+                records = current_sheet.get_all_records()
+            except Exception as e:
+                logger.error(f"Ошибка получения записей из таблицы: {e}")
+                await update.message.reply_text("⚠️ Ошибка доступа к таблице.")
+                return
+            
+            user_records = [r for r in records if str(r.get("ID", "")) == str(user_id)]
+            
+            if not user_records:
+                await update.message.reply_text(
+                    "📋 У вас пока нет заказов.\n\n"
+                    "Нажмите «🍎 Пополнить Apple ID» чтобы создать заказ."
+                )
+                return
+            
+            msg = "📋 Ваши заказы:\n\n"
+            for record in user_records:
+                order_num = record.get("Номер ордера", "N/A")
+                tariff = record.get("Тариф", "N/A")
+                rub_amt = record.get("Сумма RUB", "N/A")
+                status = record.get("Статус", "Новый")
+                
+                msg += (
+                    f"🔹 {order_num}\n"
+                    f"   Тариф: {tariff}\n"
+                    f"   Сумма: {rub_amt} ₽\n"
+                    f"   Статус: {status}\n\n"
+                )
+            
+            await update.message.reply_text(msg)
+            logger.info(f"Пользователь {user_id} просмотрел {len(user_records)} заказов")
+            return
+
+        # === ВВОД КАСТОМНОЙ СУММЫ ===
         if context.user_data.get("awaiting_apple", False):
-            text = update.message.text.strip()
             try:
                 amount = int(text)
                 if not (400 <= amount <= 45000):
@@ -1423,9 +1483,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        await update.message.reply_text(
-            "ℹ️ Напишите /start для начала работы с ботом."
-        )
     except Exception as e:
         logger.error(f"Ошибка в text_handler: {e}")
         await update.message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
