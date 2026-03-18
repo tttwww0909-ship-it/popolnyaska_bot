@@ -1862,7 +1862,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ Ошибка доступа к таблице.")
                 return
             
-            user_records = [r for r in records if str(r.get("ID", "")) == str(user_id)]
+            user_records = [r for r in records if str(r.get("User_ID", "")) == str(user_id)]
             
             if not user_records:
                 await update.message.reply_text(
@@ -1875,8 +1875,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for record in user_records:
                 order_num = record.get("Номер ордера", "N/A")
                 tariff = record.get("Тариф", "N/A")
-                rub_amt = record.get("Сумма RUB", "N/A")
-                status = record.get("Статус", "Новый")
+                rub_amt = record.get("Цена RUB", "N/A")
+                status = record.get("Статус заявки", "Новый")
                 
                 msg += (
                     f"🔹 {order_num}\n"
