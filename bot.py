@@ -10,7 +10,6 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from aiohttp import web
 
 # === ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env ===
 load_dotenv()
@@ -1660,109 +1659,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Ошибка при обработке запроса: {context.error}")
 
 
-# === ЮMONEY WEBHOOK СЕРВЕР ===
-_bot_app = None  # глобальная ссылка на приложение бота
-
-async def yoomoney_webhook(request: web.Request) -> web.Response:
-    """Обработчик HTTP-уведомлений от ЮMoney"""
-    try:
-        data = await request.post()
-
-        notification_type = data.get("notification_type", "")
-        operation_id     = data.get("operation_id", "")
-        amount           = data.get("amount", "")
-        currency         = data.get("currency", "")
-        datetime_str     = data.get("datetime", "")
-        sender           = data.get("sender", "")
-        codepro          = data.get("codepro", "")
-        label            = data.get("label", "")
-        sha1_hash        = data.get("sha1_hash", "")
-
-        # Проверяем подпись
-        check_str = "&".join([
-            notification_type, operation_id, amount, currency,
-            datetime_str, sender, codepro, YOOMONEY_SECRET, label
-        ])
-        expected_hash = hashlib.sha1(check_str.encode("utf-8")).hexdigest()
-
-        if expected_hash != sha1_hash:
-            logger.warning(f"ЮMoney: неверная подпись. label={label}")
-            return web.Response(status=400, text="Bad signature")
-
-        logger.info(f"✅ ЮMoney платёж подтверждён: label={label}, amount={amount} ₽, operation_id={operation_id}")
-
-        # Автоматически обновляем статус заказа на "Оплачен"
-        if label:
-            order_number = label
-            update_order_status(order_number, ORDER_STATUSES["paid"])
-            logger.info(f"✅ Статус {order_number} автоматически изменён на 'Оплачен'")
-
-        # Уведомляем через бота
-        if _bot_app and label:
-            order_number = label
-            
-            # Получаем user_id из ORDER_USER_MAP или из Google Sheets
-            user_id = ORDER_USER_MAP.get(order_number)
-            if not user_id:
-                try:
-                    sheet = get_sheet()
-                    if sheet:
-                        values = sheet.get_all_values()
-                        for row in values[1:]:
-                            if len(row) >= 2 and row[0] == order_number:
-                                user_id = int(row[1])
-                                break
-                except Exception as e:
-                    logger.error(f"Ошибка получения user_id для ЮMoney: {e}")
-            
-            # Уведомление клиенту
-            if user_id:
-                try:
-                    await _bot_app.bot.send_message(
-                        user_id,
-                        f"✅ Оплата через ЮMoney получена!\n\n"
-                        f"📦 Заказ: <b>{order_number}</b>\n"
-                        f"💰 Сумма: <b>{amount} ₽</b>\n\n"
-                        f"Статус заказа автоматически изменён на «Оплачен».\n"
-                        f"Менеджер активирует ваш заказ в ближайшее время.",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления клиенту: {e}")
-
-            # Уведомление админу
-            try:
-                await _bot_app.bot.send_message(
-                    ADMIN_ID,
-                    f"💳 Получена оплата через ЮMoney!\n\n"
-                    f"📦 Заказ: <b>{order_number}</b>\n"
-                    f"💰 Сумма: <b>{amount} ₽</b>\n"
-                    f"🆔 Operation ID: <code>{operation_id}</code>\n"
-                    f"👤 Отправитель: {sender or 'Анонимно'}\n\n"
-                    f"✅ Статус автоматически изменён на «Оплачен».",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа о ЮMoney платеже: {e}")
-
-        return web.Response(status=200, text="OK")
-
-    except Exception as e:
-        logger.error(f"Ошибка обработки ЮMoney webhook: {e}")
-        return web.Response(status=500, text="Error")
-
-
-async def start_webhook_server():
-    """Запускает aiohttp сервер для ЮMoney webhook"""
-    web_app = web.Application()
-    web_app.router.add_post("/yoomoney/webhook", yoomoney_webhook)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    logger.info("✅ ЮMoney webhook сервер запущен на порту 8080")
-    return runner
-
+# === ЗАПУСК БОТА ===
 
 if __name__ == "__main__":
     import asyncio
@@ -1770,7 +1667,6 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(TOKEN).build()
     _bot_app = app
-    _webhook_runner = None
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
@@ -1786,7 +1682,6 @@ if __name__ == "__main__":
         if sig:
             logger.info(f"Получен сигнал {sig.name}, завершаем работу...")
         
-        # Останавливаем бота
         try:
             await app.updater.stop()
             await app.stop()
@@ -1795,39 +1690,24 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Ошибка остановки бота: {e}")
         
-        # Останавливаем webhook сервер
-        if _webhook_runner:
-            try:
-                await _webhook_runner.cleanup()
-                logger.info("✅ Webhook сервер остановлен")
-            except Exception as e:
-                logger.error(f"Ошибка остановки webhook: {e}")
-        
-        # Очищаем память
         cleanup_memory()
         logger.info("✅ Завершение работы")
 
     async def main():
-        global _webhook_runner
-        
-        # Регистрируем обработчики сигналов (для Linux)
         try:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
         except NotImplementedError:
-            # Windows не поддерживает add_signal_handler
             pass
         
-        _webhook_runner = await start_webhook_server()
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        print("✅ Бот запущен!")
         logger.info("✅ Бот успешно запущен")
         
         try:
-            await asyncio.Event().wait()  # держим процесс живым
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             pass
         finally:
