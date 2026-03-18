@@ -1008,21 +1008,22 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ПОМОЩЬ ===
         elif query.data == "help_payment":
             keyboard = [
-                [InlineKeyboardButton("👨‍💼 Связаться с администратором", callback_data="contact_manager")],
+                [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/poplnyaska_halper")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_payment")]
             ]
             await query.edit_message_text(
-                "❓ Часто задаваемые вопросы\n\n"
-                "1️⃣ <b>Как оплатить?</b>\n"
-                "Доступные способы оплаты:\n"
-                "• 💳 ЮMoney — перевод на кошелёк\n"
-                "• 💳 OZON банк — без комиссии с OZON / 1.9% с других\n"
-                f"• 💎 Крипта USDT — через Bybit (UID: <code>{BYBIT_UID}</code>) "
-                f"или TRC20: <code>{TRC20_ADDRESS}</code>\n\n"
-                "2️⃣ <b>Когда я получу доступ?</b>\n"
-                "После подтверждения оплаты — в течение 30 минут.\n\n"
-                "3️⃣ <b>Что если платёж не прошёл?</b>\n"
-                "Свяжитесь с менеджером через кнопку ниже.",
+                "❓ <b>Краткий FAQ</b>\n\n"
+                "💳 <b>Способы оплаты:</b>\n"
+                "• OZON банк (перевод по ссылке)\n"
+                "• ЮMoney (пополнение кошелька)\n"
+                "• Bybit (перевод по UID)\n"
+                "• USDT через TRON (TRC20)\n\n"
+                "⏱ <b>Сроки:</b>\n"
+                "Пополнение в течение 15-30 минут после подтверждения оплаты.\n\n"
+                "💰 <b>Комиссия:</b>\n"
+                "15% от суммы пополнения.\n\n"
+                "❓ <b>Проблемы с оплатой?</b>\n"
+                "Свяжитесь с поддержкой через кнопку ниже.",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )
