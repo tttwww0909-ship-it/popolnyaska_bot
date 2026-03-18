@@ -450,8 +450,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resize_keyboard=True
         )
         await update.message.reply_text(
-            "Добро пожаловать в Popolnyashka! 🚀\n\n"
-            "Пополнение Apple ID в Казахстане.",
+            "Добро пожаловать в Пополняшку! 🍎\n\n"
+            "Мы готовы помочь с пополнением твоего Apple ID!\n\n"
+            "Все, что для этого нужно — нажать \"Пополнить Apple ID\" ⬇️ и следовать дальнейшим инструкциям бота. "
+            "Если возникнут проблемы, мы всегда готовы прийти на помощь!",
             reply_markup=reply_keyboard
         )
         logger.info(f"Пользователь {update.message.from_user.id} запустил бот")
@@ -559,8 +561,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")]
             ]
             await query.edit_message_text(
-                "Добро пожаловать в Pay&Use! 🚀\n\n"
-                "Пополнение Apple ID в Казахстане.",
+                "Добро пожаловать в Пополняшку! 🍎\n\n"
+                "Мы готовы помочь с пополнением твоего Apple ID!\n\n"
+                "Все, что для этого нужно — нажать \"Пополнить Apple ID\" ⬇️ и следовать дальнейшим инструкциям бота. "
+                "Если возникнут проблемы, мы всегда готовы прийти на помощь!",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
