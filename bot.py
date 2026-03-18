@@ -1376,6 +1376,39 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML"
                 )
 
+        # === ПОПОЛНЕНИЕ ПРОИЗВЕДЕНО (после получения почты) ===
+        elif query.data.startswith("topup_done_"):
+            if query.from_user.id != ADMIN_ID:
+                return
+            
+            parts = query.data.replace("topup_done_", "").split("_")
+            order_num = parts[0]
+            client_id = int(parts[1]) if len(parts) > 1 else None
+            
+            # Меняем статус на "Выполнен"
+            update_order_status(order_num, ORDER_STATUSES["completed"])
+            
+            # Уведомляем клиента
+            if client_id:
+                try:
+                    await context.bot.send_message(
+                        client_id,
+                        f"🎉 <b>Пополнение выполнено!</b>\n\n"
+                        f"📦 Заказ: <b>{order_num}</b>\n\n"
+                        f"✅ Ваш Apple ID успешно пополнен!\n"
+                        f"Спасибо, что воспользовались нашим сервисом! 🍎",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка уведомления клиента о пополнении: {e}")
+            
+            await query.edit_message_text(
+                f"✅ Заказ <b>{order_num}</b> выполнен!\n\n"
+                f"Клиент уведомлён о пополнении.",
+                parse_mode="HTML"
+            )
+            logger.info(f"Админ отметил пополнение выполненным: {order_num}")
+
         # === НАЗАД В АДМИН-ПАНЕЛЬ ===
         elif query.data == "back_to_admin":
             if query.from_user.id != ADMIN_ID:
@@ -1486,17 +1519,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = user.full_name or "Без имени"
                 username = f"@{user.username}" if user.username else "Нет username"
                 
-                # Уведомляем админа
+                # Уведомляем админа с кнопками
                 try:
+                    admin_keyboard = [
+                        [InlineKeyboardButton("✅ Пополнение произведено", callback_data=f"topup_done_{order_number}_{user_id}")],
+                        [InlineKeyboardButton("💬 Связаться с клиентом", url=f"tg://user?id={user_id}")]
+                    ]
                     await context.bot.send_message(
                         ADMIN_ID,
                         f"📧 <b>Получена почта Apple ID</b>\n\n"
-                        f"📦 Заказ: <b>{order_number}</b>\n"
-                        f"📧 Почта: <code>{email}</code>\n\n"
+                        f"📦 Заказ: <b>{order_number}</b>\n\n"
+                        f"📧 Почта для пополнения:\n"
+                        f"<code>{email}</code>\n\n"
                         f"👤 Клиент:\n"
                         f"Имя: {user_name}\n"
                         f"Ник: {username}\n"
                         f"ID: <code>{user_id}</code>",
+                        reply_markup=InlineKeyboardMarkup(admin_keyboard),
                         parse_mode="HTML"
                     )
                 except Exception as e:
