@@ -147,37 +147,9 @@ sheet = get_sheet()
 
 
 PRICES = {
-    "chatgpt_1m": 9990,
-    "chatgptgo_1m": 3390,
-    "grok_1m": 14990,
-    "grok_1y": 149990,
-    "xpremium_2m": 1250,
-    "xpremium_1m": 2500,
-    "xpremium_1y": 25000,
-    "xpremiumplus_2m": 12490,
-    "xpremiumplus_1m": 24990,
-    "xpremiumplus_1y": 249990,
     "apple_5000": 5000,
     "apple_10000": 10000,
     "apple_25000": 25000
-}
-
-
-SERVICES = {
-    "chatgpt": "ChatGPT Plus",
-    "chatgptgo": "ChatGPT Go",
-    "grok": "SuperGrok",
-    "xpremium": "X Premium",
-    "xpremiumplus": "X Premium+",
-    "apple": "Apple ID"
-}
-
-
-TARIFFS = {
-    "1m": "1 месяц",
-    "2m": "2 месяца",
-    "1y": "1 год",
-    "custom": "KZT"
 }
 
 ORDER_STATUSES = {
@@ -470,14 +442,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
     try:
         keyboard = [
-            [InlineKeyboardButton("🧾 Новый заказ", callback_data="new_order")],
-            [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
-            [InlineKeyboardButton("📄 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta-servisa-PayUse-03-16")],
-            [InlineKeyboardButton("🔒 Политика конфиденциальности", url="https://telegra.ph/Politika-konfidencialnosti-PayUse-03-16")]
+            [InlineKeyboardButton("🍎 Пополнить Apple ID", callback_data="apple_topup")],
+            [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")]
         ]
         await update.message.reply_text(
             "Добро пожаловать в Pay&Use! 🚀\n\n"
-            "Здесь вы можете купить подписки на иностранные сервисы.",
+            "Пополнение Apple ID в Казахстане.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         logger.info(f"Пользователь {update.message.from_user.id} запустил бот")
@@ -581,69 +551,31 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === НАЗАД В ГЛАВНОЕ МЕНЮ ===
         if query.data == "back_to_start":
             keyboard = [
-                [InlineKeyboardButton("🧾 Новый заказ", callback_data="new_order")],
-                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
-                [InlineKeyboardButton("📄 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta-servisa-PayUse-03-16")],
-                [InlineKeyboardButton("🔒 Политика конфиденциальности", url="https://telegra.ph/Politika-konfidencialnosti-PayUse-03-16")]
+                [InlineKeyboardButton("🍎 Пополнить Apple ID", callback_data="apple_topup")],
+                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")]
             ]
             await query.edit_message_text(
-                "Добро пожаловать в Pay&Use! 🚀",
+                "Добро пожаловать в Pay&Use! 🚀\n\n"
+                "Пополнение Apple ID в Казахстане.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
 
-        # === ВЫБОР КАТЕГОРИИ СЕРВИСА ===
-        if query.data == "new_order":
+        # === ПОПОЛНЕНИЕ APPLE ID ===
+        if query.data == "apple_topup":
             keyboard = [
-                [InlineKeyboardButton("🍎 Apple сервисы", callback_data="apple_services")],
-                [InlineKeyboardButton("🤖 AI-сервисы", callback_data="ai_services")],
-                [InlineKeyboardButton("🗣️ Социальные сети", callback_data="social_services")]
-            ]
-            await query.edit_message_text(
-                "📦 Выберите категорию сервисов",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-
-        elif query.data == "ai_services":
-            keyboard = [
-                [InlineKeyboardButton("🤖 ChatGPT Plus — 1 месяц", callback_data="chatgpt_1m")],
-                [InlineKeyboardButton("⚡ ChatGPT Go — 1 месяц", callback_data="chatgptgo_1m")],
-                [InlineKeyboardButton("🧠 SuperGrok — 1 месяц", callback_data="grok_1m")],
-                [InlineKeyboardButton("🧠 SuperGrok — 1 год", callback_data="grok_1y")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="new_order")]
-            ]
-            await query.edit_message_text(
-                "🤖 AI-сервисы",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-
-        elif query.data == "social_services":
-            keyboard = [
-                [InlineKeyboardButton("🔥 X Premium — 2 месяца", callback_data="xpremium_2m")],
-                [InlineKeyboardButton("🔥 X Premium — 1 месяц", callback_data="xpremium_1m")],
-                [InlineKeyboardButton("🔥 X Premium — 1 год", callback_data="xpremium_1y")],
-                [InlineKeyboardButton("💎 X Premium+ — 2 месяца", callback_data="xpremiumplus_2m")],
-                [InlineKeyboardButton("💎 X Premium+ — 1 месяц", callback_data="xpremiumplus_1m")],
-                [InlineKeyboardButton("💎 X Premium+ — 1 год", callback_data="xpremiumplus_1y")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="new_order")]
-            ]
-            await query.edit_message_text(
-                "🗣️ Социальные сети",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-
-        elif query.data == "apple_services":
-            keyboard = [
-                [InlineKeyboardButton("🍏 Apple ID — 5 000 KZT", callback_data="apple_5000")],
-                [InlineKeyboardButton("🍏 Apple ID — 10 000 KZT", callback_data="apple_10000")],
-                [InlineKeyboardButton("🍏 Apple ID — 25 000 KZT", callback_data="apple_25000")],
+                [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
+                [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
+                [InlineKeyboardButton("🍏 25 000 KZT", callback_data="apple_25000")],
                 [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="new_order")]
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
             ]
             await query.edit_message_text(
-                "🍎 Apple сервисы",
+                "🍎 Пополнение Apple ID\n\n"
+                "Выберите сумму пополнения:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            return
 
         elif query.data == "apple_custom":
             context.user_data["awaiting_apple"] = True
@@ -652,24 +584,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # === ПОСЛЕ ВЫБОРА СЕРВИСА — ПОКАЗЫВАЕМ ЗАЯВКУ ===
-        elif query.data in PRICES:
-            # Проверяем, не является ли сервис временно недоступным
-            service_key = query.data.split("_")[0]
-            unavailable_services = ["chatgpt", "chatgptgo", "grok", "xpremium", "xpremiumplus"]
-            
-            if service_key in unavailable_services:
-                back_callback = "ai_services" if service_key in ["chatgpt", "chatgptgo", "grok"] else "social_services"
-                await query.edit_message_text(
-                    "🔜 <b>Скоро будет доступно!</b>\n\n"
-                    "Мы работаем над тем, чтобы этот сервис стал доступен.\n"
-                    "Следите за обновлениями!",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⬅️ Назад", callback_data=back_callback)]
-                    ]),
-                    parse_mode="HTML"
-                )
-                return
-            
+        # === ВЫБОР ТАРИФА APPLE ID ===
+        elif query.data.startswith("apple_") and query.data in PRICES:
             amount = PRICES[query.data]
             rate = get_rate()
             
@@ -685,17 +601,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             user = query.from_user
-            service = query.data.split("_")[0]
-            tariff = query.data.split("_")[1]
-            service_name = SERVICES.get(service, "Unknown")
-            tariff_name = TARIFFS.get(tariff, tariff)
-            # Если тариф — число, форматируем с пробелами
-            if tariff_name.isdigit():
-                tariff_name = f"{fmt(int(tariff_name))} KZT"
+            tariff_name = f"{fmt(amount)} KZT"
 
             context.user_data["order"] = {
                 "number": order_number,
-                "service": service_name,
+                "service": "Apple ID",
                 "tariff": tariff_name,
                 "kzt": amount,
                 "rub": rub,
@@ -704,19 +614,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             keyboard = [
                 [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="new_order")]
+                [InlineKeyboardButton("❌ Отмена", callback_data="apple_topup")]
             ]
 
             await query.edit_message_text(
-                f"📦 Заявка сформирована\n\n"
+                f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
-                f"Сервис: <b>{service_name}</b>\n"
                 f"Тариф: <b>{tariff_name}</b>\n"
-                f"Стоимость: <b>{fmt(amount)} KZT</b>\n"
-                f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (15% комиссия)",
+                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия 15%)",
                 reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML",
-                disable_web_page_preview=True
+                parse_mode="HTML"
             )
             logger.info(f"Пользователь {user.id} создал заказ {order_number}")
 
@@ -819,15 +726,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["amount_usdt"] = amount_usdt
 
                 await query.edit_message_text(
-                    f"✅ Заявка отправлена!\n\n"
+                    f"✅ Заявка сформирована!\n\n"
                     f"Номер заказа: <b>{order['number']}</b>\n"
+                    f"Тариф: <b>{order['tariff']}</b>\n"
                     f"Сумма: <b>{fmt(order['rub'])} ₽</b> (~{amount_usdt} USDT)\n\n"
                     f"Выберите способ оплаты:",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
-                        [InlineKeyboardButton("💳 Оплатить через ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
-                        [InlineKeyboardButton("💎 Оплатить криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ Помощь", callback_data="help_payment")]
+                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
+                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
+                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
                     ]),
                     parse_mode="HTML"
                 )
@@ -1571,13 +1479,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 
                 user = update.message.from_user
-
-                service_name = SERVICES["apple"]
                 tariff_name = f"{fmt(amount)} KZT"
 
                 context.user_data["order"] = {
                     "number": order_number,
-                    "service": service_name,
+                    "service": "Apple ID",
                     "tariff": tariff_name,
                     "kzt": amount,
                     "rub": rub,
@@ -1586,19 +1492,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 keyboard = [
                     [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="new_order")]
+                    [InlineKeyboardButton("❌ Отмена", callback_data="apple_topup")]
                 ]
 
                 await update.message.reply_text(
-                    f"📦 Заявка сформирована\n\n"
+                    f"📦 Информация о заказе\n\n"
                     f"Номер заказа: <b>{order_number}</b>\n"
-                    f"Сервис: {service_name}\n"
-                    f"Тариф: {tariff_name}\n"
-                    f"Стоимость: <b>{fmt(amount)} KZT</b>\n"
-                    f"Итоговая сумма: <b>{fmt(rub)} ₽</b> (15% комиссия)",
+                    f"Тариф: <b>{tariff_name}</b>\n"
+                    f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия 15%)",
                     reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
+                    parse_mode="HTML"
                 )
                 context.user_data["awaiting_apple"] = False
                 logger.info(f"Пользователь {user_id} создал заказ Apple на {amount} KZT")
