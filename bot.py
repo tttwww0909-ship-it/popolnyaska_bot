@@ -189,7 +189,7 @@ sheet = get_sheet()
 PRICES = {
     "apple_5000": 5000,
     "apple_10000": 10000,
-    "apple_25000": 25000
+    "apple_15000": 15000
 }
 
 ORDER_STATUSES = {
@@ -514,8 +514,9 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         keyboard = [
+            [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
             [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+            [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_stats")],
             [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
         ]
         await update.message.reply_text(
@@ -555,7 +556,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             # Ищем по ID (второй столбец)
-            user_records = [r for r in records if str(r.get("ID", "")) == str(user_id)]
+            user_records = [r for r in records if str(r.get("User_ID", "")) == str(user_id)]
             
             if not user_records:
                 await query.edit_message_text(
@@ -573,10 +574,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             for record in user_records:
                 order_num = record.get("Номер ордера", "N/A")
-                service = record.get("Сервис", "N/A")
+                service = record.get("Услуга", "N/A")
                 tariff = record.get("Тариф", "N/A")
-                rub_amt = record.get("Сумма RUB", "N/A")
-                status = record.get("Статус", "Новый")
+                rub_amt = record.get("Цена RUB", "N/A")
+                status = record.get("Статус заявки", "Новый")
                 
                 msg += (
                     f"🔹 {order_num}\n"
@@ -709,7 +710,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
                 [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
-                [InlineKeyboardButton("🍏 25 000 KZT", callback_data="apple_25000")],
+                [InlineKeyboardButton("🍏 15 000 KZT", callback_data="apple_15000")],
                 [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
             ]
@@ -723,7 +724,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == "apple_custom":
             context.user_data["awaiting_apple"] = True
             await query.edit_message_text(
-                "Введите сумму пополнения Apple ID (400–45 000 KZT)"
+                "Введите сумму пополнения Apple ID (2 000–45 000 KZT)"
             )
 
         # === ПОСЛЕ ВЫБОРА СЕРВИСА — ПОКАЗЫВАЕМ ЗАЯВКУ ===
@@ -1137,15 +1138,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif sheet:
                 try:
                     records = sheet.get_all_records()
-                    user_records = [r for r in records if str(r.get("ID", "")) == str(user_id)]
+                    user_records = [r for r in records if str(r.get("User_ID", "")) == str(user_id)]
                     if user_records:
                         last = user_records[-1]
                         client_info += f"\n\n<b>📦 Последний заказ:</b>\n" \
                                       f"Номер: <b>{last.get('Номер ордера', 'N/A')}</b>\n" \
-                                      f"Сервис: <b>{last.get('Сервис', 'N/A')}</b>\n" \
+                                      f"Услуга: <b>{last.get('Услуга', 'N/A')}</b>\n" \
                                       f"Тариф: <b>{last.get('Тариф', 'N/A')}</b>\n" \
-                                      f"Сумма: <b>{last.get('Сумма RUB', 'N/A')} ₽</b> ({last.get('Сумма KZT', 'N/A')} KZT)\n" \
-                                      f"Статус: <b>{last.get('Статус', 'N/A')}</b>"
+                                      f"Сумма: <b>{last.get('Цена RUB', 'N/A')} ₽</b> ({last.get('Цена KZT', 'N/A')} KZT)\n" \
+                                      f"Статус: <b>{last.get('Статус заявки', 'N/A')}</b>"
                     else:
                         client_info += "\n\n📦 Заказов не найдено"
                 except Exception as e:
@@ -1282,20 +1283,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 records = sheet.get_all_records()
                 
                 total_orders = len(records)
-                unique_users = len(set(str(r.get("ID", "")) for r in records if r.get("ID")))
+                unique_users = len(set(str(r.get("User_ID", "")) for r in records if r.get("User_ID")))
                 
                 # По статусам
                 statuses = {}
                 for r in records:
-                    status = r.get("Статус", "Неизвестен")
+                    status = r.get("Статус заявки", "Неизвестен")
                     statuses[status] = statuses.get(status, 0) + 1
                 
                 # Выручка (только выполненные)
-                revenue = sum(int(r.get("Сумма RUB", 0) or 0) for r in records if r.get("Статус") == "Выполнен")
-                total_kzt = sum(int(r.get("Сумма KZT", 0) or 0) for r in records if r.get("Статус") == "Выполнен")
+                revenue = sum(int(r.get("Цена RUB", 0) or 0) for r in records if r.get("Статус заявки") == "Выполнен")
+                total_kzt = sum(int(r.get("Цена KZT", 0) or 0) for r in records if r.get("Статус заявки") == "Выполнен")
                 
                 # Средний чек
-                completed = [r for r in records if r.get("Статус") == "Выполнен"]
+                completed = [r for r in records if r.get("Статус заявки") == "Выполнен"]
                 avg_check = int(revenue / len(completed)) if completed else 0
                 
                 # Конверсия
@@ -1354,23 +1355,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Фильтруем по дате
                 period_records = []
                 for r in records:
-                    date_str = r.get("Дата", "")
+                    date_str = r.get("Дата создания", "")
                     if date_str:
                         try:
-                            order_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+                            order_date = datetime.strptime(str(date_str), "%d.%m.%Y %H:%M")
                             if order_date >= start_date:
                                 period_records.append(r)
                         except:
                             pass
                 
                 total = len(period_records)
-                completed = [r for r in period_records if r.get("Статус") == "Выполнен"]
-                revenue = sum(int(r.get("Сумма RUB", 0) or 0) for r in completed)
+                completed = [r for r in period_records if r.get("Статус заявки") == "Выполнен"]
+                revenue = sum(int(r.get("Цена RUB", 0) or 0) for r in completed)
                 
                 # По статусам
                 statuses = {}
                 for r in period_records:
-                    status = r.get("Статус", "Неизвестен")
+                    status = r.get("Статус заявки", "Неизвестен")
                     statuses[status] = statuses.get(status, 0) + 1
                 
                 msg = (
@@ -1407,14 +1408,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Группируем по клиентам
                 clients = {}
                 for r in records:
-                    user_id = str(r.get("ID", ""))
+                    user_id = str(r.get("User_ID", ""))
                     username = r.get("Username", "Неизвестен")
                     if user_id:
                         if user_id not in clients:
                             clients[user_id] = {"username": username, "orders": 0, "revenue": 0}
                         clients[user_id]["orders"] += 1
-                        if r.get("Статус") == "Выполнен":
-                            clients[user_id]["revenue"] += int(r.get("Сумма RUB", 0) or 0)
+                        if r.get("Статус заявки") == "Выполнен":
+                            clients[user_id]["revenue"] += int(r.get("Цена RUB", 0) or 0)
                 
                 # Топ 10 по выручке
                 top_clients = sorted(clients.items(), key=lambda x: x[1]["revenue"], reverse=True)[:10]
@@ -1455,8 +1456,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if tariff not in tariffs:
                         tariffs[tariff] = {"count": 0, "revenue": 0}
                     tariffs[tariff]["count"] += 1
-                    if r.get("Статус") == "Выполнен":
-                        tariffs[tariff]["revenue"] += int(r.get("Сумма RUB", 0) or 0)
+                    if r.get("Статус заявки") == "Выполнен":
+                        tariffs[tariff]["revenue"] += int(r.get("Цена RUB", 0) or 0)
                 
                 # Сортируем по популярности
                 sorted_tariffs = sorted(tariffs.items(), key=lambda x: x[1]["count"], reverse=True)
@@ -1466,7 +1467,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f"• <b>{tariff}</b>: {data['count']} заказов, {fmt(data['revenue'])} ₽\n"
                 
                 # Средняя сумма пополнения
-                all_kzt = [int(r.get("Сумма KZT", 0) or 0) for r in records if r.get("Сумма KZT")]
+                all_kzt = [int(r.get("Цена KZT", 0) or 0) for r in records if r.get("Цена KZT")]
                 avg_kzt = int(sum(all_kzt) / len(all_kzt)) if all_kzt else 0
                 
                 msg += f"\n📊 Средняя сумма пополнения: <b>{fmt(avg_kzt)} KZT</b>"
@@ -1677,8 +1678,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if query.from_user.id != ADMIN_ID:
                 return
             keyboard = [
+                [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
                 [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-                [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+                [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_stats")],
                 [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
             ]
             await query.edit_message_text(
@@ -1823,7 +1825,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
                 [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
-                [InlineKeyboardButton("🍏 25 000 KZT", callback_data="apple_25000")],
+                [InlineKeyboardButton("🍏 15 000 KZT", callback_data="apple_15000")],
                 [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")]
             ]
             await update.message.reply_text(
@@ -1893,9 +1895,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data.get("awaiting_apple", False):
             try:
                 amount = int(text)
-                if not (400 <= amount <= 45000):
+                if not (2000 <= amount <= 45000):
                     await update.message.reply_text(
-                        "❌ Неверный диапазон.\n\nВведите сумму от 400 до 45 000 KZT:"
+                        "❌ Неверный диапазон.\n\nВведите сумму от 2 000 до 45 000 KZT:"
                     )
                     return
                 
@@ -1948,7 +1950,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             except ValueError:
                 await update.message.reply_text(
-                    "❌ Введите только число.\n\nПовторите ввод суммы (400–45 000 KZT):"
+                    "❌ Введите только число.\n\nПовторите ввод суммы (2 000–45 000 KZT):"
                 )
                 return
 
