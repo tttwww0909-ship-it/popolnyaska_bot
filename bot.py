@@ -7,8 +7,7 @@ import json
 import logging
 import os
 import asyncio
-import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 # === ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env ===
@@ -35,7 +34,6 @@ if not ADMIN_ID:
     raise ValueError("❌ ADMIN_ID не установлен в .env файле!")
 
 print(f"✅ Переменные окружения загружены")
-print(f"   TOKEN: {TOKEN[:10]}... (скрыто)")
 print(f"   ADMIN_ID: {ADMIN_ID}")
 
 # === ЛОГИРОВАНИЕ ===
@@ -113,7 +111,6 @@ class TimedDict(dict):
                 pass
 
 
-user_orders = {}  # Формат: {user_id: [timestamp1, timestamp2, ...]}
 ORDER_USER_MAP = TimedDict(max_age_seconds=86400)  # 24 часа
 PAYMENT_MAP = TimedDict(max_age_seconds=3600)  # 1 час
 ORDER_INFO_MAP = TimedDict(max_age_seconds=604800)  # 7 дней
@@ -463,16 +460,6 @@ def cleanup_memory():
         PAYMENT_MAP.cleanup()
         ORDER_INFO_MAP.cleanup()
         
-        # Очищаем user_orders старше 20 минут
-        current_time = time.time()
-        for user_id in list(user_orders.keys()):
-            user_orders[user_id] = [
-                t for t in user_orders[user_id]
-                if current_time - t < 1200
-            ]
-            if not user_orders[user_id]:
-                del user_orders[user_id]
-        
         logger.info("Память очищена")
     except Exception as e:
         logger.error(f"Ошибка при очистке памяти: {e}")
@@ -516,8 +503,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
             [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-            [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_stats")],
-            [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
+            [InlineKeyboardButton(" Изменить статус заказа", callback_data="admin_manage_orders")]
         ]
         await update.message.reply_text(
             "⚙️ Админ панель",
@@ -809,6 +795,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "number": order_number,
                     "user_id": user_id,
                     "username": order["user"].username or "Нет ника",
+                    "first_name": order["user"].first_name or "Клиент",
                     "service": order["service"],
                     "tariff": order["tariff"],
                     "kzt": order["kzt"],
@@ -1247,29 +1234,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_admin")]]
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-        # === АДМИН-ПАНЕЛЬ: СТАТИСТИКА ===
-        elif query.data == "admin_stats":
-            if query.from_user.id != ADMIN_ID:
-                await query.answer("❌ У вас нет доступа", show_alert=True)
-                return
-            
-            # Показываем меню статистики
-            keyboard = [
-                [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
-                [InlineKeyboardButton("📅 За сегодня", callback_data="stats_today")],
-                [InlineKeyboardButton("📆 За неделю", callback_data="stats_week")],
-                [InlineKeyboardButton("📈 За месяц", callback_data="stats_month")],
-                [InlineKeyboardButton("👥 По клиентам", callback_data="stats_clients")],
-                [InlineKeyboardButton("💰 По тарифам", callback_data="stats_tariffs")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_admin")]
-            ]
-            await query.edit_message_text(
-                "📊 <b>Статистика</b>\n\n"
-                "Выберите раздел:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
-
         # === ОБЩАЯ СТАТИСТИКА ===
         elif query.data == "stats_general":
             if query.from_user.id != ADMIN_ID:
@@ -1322,163 +1286,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await query.edit_message_text(
                     msg,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_stats")]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_admin")]]),
                     parse_mode="HTML"
                 )
             except Exception as e:
                 logger.error(f"Ошибка получения статистики: {e}")
-                await query.edit_message_text("⚠️ Ошибка получения статистики.")
-
-        # === СТАТИСТИКА ЗА ПЕРИОД ===
-        elif query.data in ["stats_today", "stats_week", "stats_month"]:
-            if query.from_user.id != ADMIN_ID:
-                return
-            try:
-                sheet = get_sheet()
-                if not sheet:
-                    await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
-                    return
-                
-                records = sheet.get_all_records()
-                now = datetime.now()
-                
-                if query.data == "stats_today":
-                    period_name = "СЕГОДНЯ"
-                    start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                elif query.data == "stats_week":
-                    period_name = "ЗА НЕДЕЛЮ"
-                    start_date = now - timedelta(days=7)
-                else:
-                    period_name = "ЗА МЕСЯЦ"
-                    start_date = now - timedelta(days=30)
-                
-                # Фильтруем по дате
-                period_records = []
-                for r in records:
-                    date_str = r.get("Дата создания", "")
-                    if date_str:
-                        try:
-                            order_date = datetime.strptime(str(date_str), "%d.%m.%Y %H:%M")
-                            if order_date >= start_date:
-                                period_records.append(r)
-                        except:
-                            pass
-                
-                total = len(period_records)
-                completed = [r for r in period_records if r.get("Статус заявки") == "Выполнен"]
-                revenue = sum(int(r.get("Цена RUB", 0) or 0) for r in completed)
-                
-                # По статусам
-                statuses = {}
-                for r in period_records:
-                    status = r.get("Статус заявки", "Неизвестен")
-                    statuses[status] = statuses.get(status, 0) + 1
-                
-                msg = (
-                    f"📊 <b>СТАТИСТИКА {period_name}</b>\n\n"
-                    f"📦 Заказов: <b>{total}</b>\n"
-                    f"✅ Выполнено: <b>{len(completed)}</b>\n"
-                    f"💰 Выручка: <b>{fmt(revenue)} ₽</b>\n\n"
-                    f"<b>По статусам:</b>\n"
-                )
-                for status, count in statuses.items():
-                    msg += f"• {status}: <b>{count}</b>\n"
-                
-                await query.edit_message_text(
-                    msg,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_stats")]]),
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка получения статистики за период: {e}")
-                await query.edit_message_text("⚠️ Ошибка получения статистики.")
-
-        # === СТАТИСТИКА ПО КЛИЕНТАМ ===
-        elif query.data == "stats_clients":
-            if query.from_user.id != ADMIN_ID:
-                return
-            try:
-                sheet = get_sheet()
-                if not sheet:
-                    await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
-                    return
-                
-                records = sheet.get_all_records()
-                
-                # Группируем по клиентам
-                clients = {}
-                for r in records:
-                    user_id = str(r.get("User_ID", ""))
-                    username = r.get("Username", "Неизвестен")
-                    if user_id:
-                        if user_id not in clients:
-                            clients[user_id] = {"username": username, "orders": 0, "revenue": 0}
-                        clients[user_id]["orders"] += 1
-                        if r.get("Статус заявки") == "Выполнен":
-                            clients[user_id]["revenue"] += int(r.get("Цена RUB", 0) or 0)
-                
-                # Топ 10 по выручке
-                top_clients = sorted(clients.items(), key=lambda x: x[1]["revenue"], reverse=True)[:10]
-                
-                msg = (
-                    f"👥 <b>СТАТИСТИКА ПО КЛИЕНТАМ</b>\n\n"
-                    f"Всего клиентов: <b>{len(clients)}</b>\n\n"
-                    f"<b>🏆 ТОП-10 по выручке:</b>\n"
-                )
-                for i, (user_id, data) in enumerate(top_clients, 1):
-                    msg += f"{i}. {data['username']} — {fmt(data['revenue'])} ₽ ({data['orders']} заказов)\n"
-                
-                await query.edit_message_text(
-                    msg,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_stats")]]),
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка получения статистики клиентов: {e}")
-                await query.edit_message_text("⚠️ Ошибка получения статистики.")
-
-        # === СТАТИСТИКА ПО ТАРИФАМ ===
-        elif query.data == "stats_tariffs":
-            if query.from_user.id != ADMIN_ID:
-                return
-            try:
-                sheet = get_sheet()
-                if not sheet:
-                    await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
-                    return
-                
-                records = sheet.get_all_records()
-                
-                # Группируем по тарифам
-                tariffs = {}
-                for r in records:
-                    tariff = r.get("Тариф", "Неизвестен")
-                    if tariff not in tariffs:
-                        tariffs[tariff] = {"count": 0, "revenue": 0}
-                    tariffs[tariff]["count"] += 1
-                    if r.get("Статус заявки") == "Выполнен":
-                        tariffs[tariff]["revenue"] += int(r.get("Цена RUB", 0) or 0)
-                
-                # Сортируем по популярности
-                sorted_tariffs = sorted(tariffs.items(), key=lambda x: x[1]["count"], reverse=True)
-                
-                msg = "💰 <b>СТАТИСТИКА ПО ТАРИФАМ</b>\n\n"
-                for tariff, data in sorted_tariffs:
-                    msg += f"• <b>{tariff}</b>: {data['count']} заказов, {fmt(data['revenue'])} ₽\n"
-                
-                # Средняя сумма пополнения
-                all_kzt = [int(r.get("Цена KZT", 0) or 0) for r in records if r.get("Цена KZT")]
-                avg_kzt = int(sum(all_kzt) / len(all_kzt)) if all_kzt else 0
-                
-                msg += f"\n📊 Средняя сумма пополнения: <b>{fmt(avg_kzt)} KZT</b>"
-                
-                await query.edit_message_text(
-                    msg,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_stats")]]),
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка получения статистики тарифов: {e}")
                 await query.edit_message_text("⚠️ Ошибка получения статистики.")
 
         # === АДМИН-ПАНЕЛЬ: УПРАВЛЕНИЕ СТАТУСАМИ ===
@@ -1680,8 +1492,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
                 [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-                [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_stats")],
-                [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
+                [InlineKeyboardButton(" Изменить статус заказа", callback_data="admin_manage_orders")]
             ]
             await query.edit_message_text(
                 "⚙️ Админ панель",
