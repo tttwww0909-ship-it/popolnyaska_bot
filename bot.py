@@ -727,7 +727,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_keyboard = ReplyKeyboardMarkup(
             [
                 [KeyboardButton("🍏 Пополнить Apple ID")],
-                [KeyboardButton("📋 Заказы"), KeyboardButton("❓ FAQ")]
+                [KeyboardButton("📋 Заказы"), KeyboardButton("❓ FAQ")],
+                [KeyboardButton("⭐ Отзывы")]
             ],
             resize_keyboard=True
         )
@@ -835,12 +836,40 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [InlineKeyboardButton("🍏 Пополнить Apple ID", callback_data="apple_topup")],
                 [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
-                [InlineKeyboardButton("❓ FAQ", callback_data="faq_menu")]
+                [InlineKeyboardButton("❓ FAQ", callback_data="faq_menu")],
+                [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")]
             ]
             await query.edit_message_text(
                 "🍏 Главное меню\n\n"
                 "Выбери действие или используй кнопки внизу:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        # === ОТЗЫВЫ ===
+        if query.data == "reviews":
+            keyboard = [
+                [InlineKeyboardButton("📢 Отзывы в канале", url="https://t.me/popolnyaskaservice")],
+                [InlineKeyboardButton("✍️ Оставить отзыв", url="https://t.me/poplnyaska_halper")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
+            ]
+            await query.edit_message_text(
+                "⭐ <b>Отзывы наших клиентов</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Пополнил Apple ID за 15 минут, всё чётко! Рекомендую\"</i>\n"
+                "— Клиент из Казахстана\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Заказал Gift Card США, код пришёл быстро. Сервис огонь 🔥\"</i>\n"
+                "— Клиент из России\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Второй раз пользуюсь, всё работает без проблем\"</i>\n"
+                "— Постоянный клиент\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "📢 Больше отзывов — в нашем канале\n"
+                "✍️ Хотите оставить отзыв? Напишите менеджеру!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
             )
             return
 
@@ -2189,6 +2218,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🍏 Пополнение Apple ID\n\n"
                 "Выбери регион своего Apple ID:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        if text == "⭐ Отзывы":
+            keyboard = [
+                [InlineKeyboardButton("📢 Отзывы в канале", url="https://t.me/popolnyaskaservice")],
+                [InlineKeyboardButton("✍️ Оставить отзыв", url="https://t.me/poplnyaska_halper")]
+            ]
+            await update.message.reply_text(
+                "⭐ <b>Отзывы наших клиентов</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Пополнил Apple ID за 15 минут, всё чётко! Рекомендую\"</i>\n"
+                "— Клиент из Казахстана\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Заказал Gift Card США, код пришёл быстро. Сервис огонь 🔥\"</i>\n"
+                "— Клиент из России\n\n"
+                "⭐⭐⭐⭐⭐\n"
+                "<i>\"Второй раз пользуюсь, всё работает без проблем\"</i>\n"
+                "— Постоянный клиент\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "📢 Больше отзывов — в нашем канале\n"
+                "✍️ Хотите оставить отзыв? Напишите менеджеру!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
             )
             return
 
