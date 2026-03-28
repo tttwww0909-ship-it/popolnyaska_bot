@@ -88,6 +88,7 @@ class Database:
     
     def add_user(self, telegram_id: int, username: str = None, first_name: str = None) -> int:
         """Добавляет или обновляет пользователя"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -111,15 +112,18 @@ class Database:
                 logger.info(f"Добавлен новый пользователь: {telegram_id}")
             
             conn.commit()
-            conn.close()
             return user_id
             
         except Exception as e:
             logger.error(f"❌ Ошибка добавления пользователя: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
     
     def get_user(self, telegram_id: int) -> Optional[Dict]:
         """Получает пользователя по telegram_id"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             conn.row_factory = sqlite3.Row
@@ -127,17 +131,20 @@ class Database:
             
             c.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
             result = c.fetchone()
-            conn.close()
             
             return dict(result) if result else None
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения пользователя: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
     
     def add_order(self, order_number: str, user_id: int, service: str, tariff: str,
                   amount_kzt: int, amount_rub: int, payment_id: str = None) -> Optional[int]:
         """Добавляет новый заказ в БД"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -150,7 +157,6 @@ class Database:
             
             order_id = c.lastrowid
             conn.commit()
-            conn.close()
             
             logger.info(f"✅ Заказ {order_number} добавлен в БД")
             return order_id
@@ -158,9 +164,13 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка добавления заказа: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
     
     def get_order(self, order_number: str) -> Optional[Dict]:
         """Получает заказ по номеру"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             conn.row_factory = sqlite3.Row
@@ -168,16 +178,19 @@ class Database:
             
             c.execute("SELECT * FROM orders WHERE order_number = ?", (order_number,))
             result = c.fetchone()
-            conn.close()
             
             return dict(result) if result else None
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения заказа: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
     
     def get_user_orders(self, user_id: int) -> List[Dict]:
         """Получает все заказы пользователя"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             conn.row_factory = sqlite3.Row
@@ -185,16 +198,19 @@ class Database:
             
             c.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
             results = c.fetchall()
-            conn.close()
             
             return [dict(row) for row in results]
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения заказов пользователя: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
     
     def update_order_status(self, order_number: str, new_status: str) -> bool:
         """Обновляет статус заказа"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -207,11 +223,9 @@ class Database:
             
             if c.rowcount == 0:
                 logger.warning(f"Заказ {order_number} не найден")
-                conn.close()
                 return False
             
             conn.commit()
-            conn.close()
             
             logger.info(f"✅ Статус {order_number} изменён на {new_status}")
             return True
@@ -219,9 +233,13 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка обновления статуса: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def get_order_by_payment_id(self, payment_id: str) -> Optional[Dict]:
         """Получает заказ по payment_id"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             conn.row_factory = sqlite3.Row
@@ -229,16 +247,19 @@ class Database:
             
             c.execute("SELECT * FROM orders WHERE payment_id = ?", (payment_id,))
             result = c.fetchone()
-            conn.close()
             
             return dict(result) if result else None
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения заказа по payment_id: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
     
     def add_payment(self, payment_id: str, order_id: int, amount: float) -> bool:
         """Добавляет платёж"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -249,16 +270,19 @@ class Database:
             ''', (payment_id, order_id, amount))
             
             conn.commit()
-            conn.close()
             logger.info(f"✅ Платёж {payment_id} добавлен")
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка добавления платежа: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def update_payment_status(self, payment_id: str, status: str) -> bool:
         """Обновляет статус платежа"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -271,11 +295,9 @@ class Database:
             
             if c.rowcount == 0:
                 logger.warning(f"Платёж {payment_id} не найден")
-                conn.close()
                 return False
             
             conn.commit()
-            conn.close()
             
             logger.info(f"✅ Платёж {payment_id} обновлён: {status}")
             return True
@@ -283,9 +305,13 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка обновления платежа: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def log_action(self, user_id: int, action: str, details: str = None) -> bool:
         """Логирует действие пользователя"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -296,15 +322,18 @@ class Database:
             ''', (user_id, action, details))
             
             conn.commit()
-            conn.close()
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка логирования действия: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def get_stats(self) -> Dict:
         """Получает статистику"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -318,8 +347,6 @@ class Database:
             c.execute("SELECT COUNT(*) FROM orders WHERE status = 'paid'")
             paid_orders = c.fetchone()[0]
             
-            conn.close()
-            
             return {
                 "users": users_count,
                 "orders": orders_count,
@@ -329,6 +356,9 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {}
+        finally:
+            if conn:
+                conn.close()
 
 
 # Создаём глобальный объект БД

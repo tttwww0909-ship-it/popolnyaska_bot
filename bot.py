@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import asyncio
+import threading
+import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -25,6 +27,7 @@ YOOMONEY_SECRET = os.getenv("YOOMONEY_SECRET", "")
 # Платёжные реквизиты
 OZON_PAY_URL = os.getenv("OZON_PAY_URL", "")
 BYBIT_UID = os.getenv("BYBIT_UID", "")
+BSC_ADDRESS = os.getenv("BSC_ADDRESS", "")
 TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
 
 # Проверяем, что все переменные загружены
@@ -99,14 +102,13 @@ class TimedDict(dict):
         """Удаляет все устаревшие записи"""
         current_time = time.time()
         expired_keys = [
-            key for key, timestamp in self.timestamps.items()
+            key for key, timestamp in list(self.timestamps.items())
             if current_time - timestamp > self.max_age
         ]
         for key in expired_keys:
+            self.timestamps.pop(key, None)
             try:
-                del self[key]
-                del self.timestamps[key]
-                logger.info(f"Cleaned up expired key: {key}")
+                dict.__delitem__(self, key)
             except KeyError:
                 pass
 
@@ -117,6 +119,7 @@ ORDER_INFO_MAP = TimedDict(max_age_seconds=604800)  # 7 дней
 ORDER_LOCK = {}  # Защита от дублей: {order_number: True}
 AWAITING_SCREENSHOT = TimedDict(max_age_seconds=86400)  # user_id: order_number
 AWAITING_EMAIL = TimedDict(max_age_seconds=86400)  # user_id: order_number (ожидание почты Apple ID)
+AWAITING_CODE = {}  # admin_id: {"order_num": ..., "client_id": ...} (ожидание ввода кода админом)
 
 # === АНТИСПАМ ===
 USER_ORDER_TIMES = {}  # user_id: [timestamp1, timestamp2, ...] — время создания заказов
@@ -160,8 +163,14 @@ def mark_order_created(user_id: int):
 
 
 # === GOOGLE SHEETS ===
+_sheet_cache = {"sheet": None, "time": 0}
+_SHEET_CACHE_TTL = 300  # 5 минут
+
 def get_sheet():
-    """Получает объект таблицы с обработкой ошибок"""
+    """Получает объект таблицы с кэшированием (5 мин)"""
+    now = time.time()
+    if _sheet_cache["sheet"] and now - _sheet_cache["time"] < _SHEET_CACHE_TTL:
+        return _sheet_cache["sheet"]
     try:
         scope = [
             "https://spreadsheets.google.com/feeds",
@@ -173,14 +182,189 @@ def get_sheet():
         )
         client = gspread.authorize(creds)
         sheet = client.open("popolnyaska_bot").sheet1
+        _sheet_cache["sheet"] = sheet
+        _sheet_cache["time"] = now
         logger.info("✅ Подключение к Google Sheets успешно")
         return sheet
     except Exception as e:
         logger.error(f"Ошибка подключения к Google Sheets: {e}")
+        _sheet_cache["sheet"] = None
+        _sheet_cache["time"] = 0
         return None
 
 
-sheet = get_sheet()
+def _run_stats_update():
+    """Запускает обновление статистики в фоновом потоке"""
+    threading.Thread(target=update_stats_sheet, daemon=True).start()
+
+MONTH_NAMES = {
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+}
+
+
+def update_stats_sheet():
+    """Полностью обновляет лист 'Статистика' в Google Sheets"""
+    try:
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open("popolnyaska_bot")
+
+        # Получаем лист "Статистика" или создаём
+        try:
+            stats_ws = spreadsheet.worksheet("Статистика")
+        except gspread.exceptions.WorksheetNotFound:
+            stats_ws = spreadsheet.add_worksheet(title="Статистика", rows=100, cols=6)
+
+        # Читаем все заказы с основного листа
+        main_sheet = spreadsheet.sheet1
+        records = main_sheet.get_all_records()
+
+        if not records:
+            stats_ws.clear()
+            stats_ws.update("A1", [["Нет данных для статистики"]])
+            return
+
+        today_str = datetime.now().strftime("%d.%m.%Y")
+
+        # === ПОДСЧЁТЫ ===
+        total = len(records)
+        unique_users = len(set(str(r.get("User_ID", "")) for r in records if r.get("User_ID")))
+
+        statuses = {}
+        for r in records:
+            s = r.get("Статус", "—")
+            statuses[s] = statuses.get(s, 0) + 1
+
+        completed_records = [r for r in records if r.get("Статус") == "Выполнен"]
+        revenue = sum(int(r.get("Сумма RUB", 0) or 0) for r in completed_records)
+        avg_check = int(revenue / len(completed_records)) if completed_records else 0
+        paid_count = statuses.get("Оплачен", 0) + statuses.get("Выполнен", 0)
+        conversion = int(paid_count / total * 100) if total > 0 else 0
+
+        # Сегодня
+        today_records = [r for r in records if str(r.get("Дата", "")).startswith(today_str)]
+        today_orders = len(today_records)
+        today_completed = [r for r in today_records if r.get("Статус") == "Выполнен"]
+        today_revenue = sum(int(r.get("Сумма RUB", 0) or 0) for r in today_completed)
+        today_users = len(set(str(r.get("User_ID", "")) for r in today_records if r.get("User_ID")))
+
+        # По месяцам
+        months_data = {}
+        for r in records:
+            date_str = str(r.get("Дата", ""))
+            if not date_str:
+                continue
+            try:
+                parts = date_str.split(" ")[0].split(".")
+                month_key = (int(parts[2]), int(parts[1]))  # (year, month)
+            except (IndexError, ValueError):
+                continue
+            if month_key not in months_data:
+                months_data[month_key] = {"orders": 0, "users": set(), "revenue": 0, "paid": 0}
+            months_data[month_key]["orders"] += 1
+            months_data[month_key]["users"].add(str(r.get("User_ID", "")))
+            if r.get("Статус") in ("Оплачен", "Выполнен"):
+                months_data[month_key]["paid"] += 1
+            if r.get("Статус") == "Выполнен":
+                months_data[month_key]["revenue"] += int(r.get("Сумма RUB", 0) or 0)
+
+        # По регионам
+        regions_data = {}
+        for r in records:
+            reg = r.get("Регион", "—") or "—"
+            if reg not in regions_data:
+                regions_data[reg] = {"orders": 0, "users": set(), "revenue": 0, "paid": 0}
+            regions_data[reg]["orders"] += 1
+            regions_data[reg]["users"].add(str(r.get("User_ID", "")))
+            if r.get("Статус") in ("Оплачен", "Выполнен"):
+                regions_data[reg]["paid"] += 1
+            if r.get("Статус") == "Выполнен":
+                regions_data[reg]["revenue"] += int(r.get("Сумма RUB", 0) or 0)
+
+        # По способам оплаты
+        payment_methods = {}
+        for r in records:
+            pm = r.get("Способ оплаты", "") or ""
+            if pm:
+                payment_methods[pm] = payment_methods.get(pm, 0) + 1
+
+        # === ФОРМИРУЕМ ТАБЛИЦУ ===
+        rows = []
+
+        # ЗАКАЗЫ
+        rows.append(["═══ ЗАКАЗЫ ═══", ""])
+        rows.append(["Всего заказов:", total])
+        rows.append(["Уникальных клиентов:", unique_users])
+        rows.append(["Ожидает оплаты:", statuses.get("Ожидает оплаты", 0)])
+        rows.append(["Оплачено:", statuses.get("Оплачен", 0)])
+        rows.append(["Выполнено:", statuses.get("Выполнен", 0)])
+        rows.append(["Отменено:", statuses.get("Отменён", 0)])
+        rows.append(["", ""])
+
+        # ФИНАНСЫ
+        rows.append(["═══ ФИНАНСЫ ═══", ""])
+        rows.append(["Выручка (₽):", fmt(revenue)])
+        rows.append(["Средний чек (₽):", fmt(avg_check)])
+        rows.append(["Конверсия (%):", conversion])
+        rows.append(["", ""])
+
+        # СЕГОДНЯ
+        rows.append(["═══ СЕГОДНЯ ═══", ""])
+        rows.append(["Заказов сегодня:", today_orders])
+        rows.append(["Выручка сегодня (₽):", fmt(today_revenue)])
+        rows.append(["Клиентов сегодня:", today_users])
+        rows.append(["", ""])
+
+        # ПО МЕСЯЦАМ
+        rows.append(["═══ ПО МЕСЯЦАМ ═══", "", "", "", ""])
+        rows.append(["Месяц", "Заказов", "Клиентов", "Выручка (₽)", "Конверсия (%)"])
+        for key in sorted(months_data.keys()):
+            year, month = key
+            m = months_data[key]
+            m_conv = int(m["paid"] / m["orders"] * 100) if m["orders"] > 0 else 0
+            month_name = f"{MONTH_NAMES.get(month, month)} {year}"
+            rows.append([month_name, m["orders"], len(m["users"]), fmt(m["revenue"]), m_conv])
+        rows.append(["", ""])
+
+        # ПО РЕГИОНАМ
+        rows.append(["═══ ПО РЕГИОНАМ ═══", "", "", "", ""])
+        rows.append(["Регион", "Заказов", "Клиентов", "Выручка (₽)", "Конверсия (%)"])
+        for reg_code in ["US", "AE", "TR", "KZ", "SA"]:
+            if reg_code in regions_data:
+                rd = regions_data[reg_code]
+                r_conv = int(rd["paid"] / rd["orders"] * 100) if rd["orders"] > 0 else 0
+                reg_name = REGION_DISPLAY.get(reg_code, reg_code)
+                rows.append([reg_name, rd["orders"], len(rd["users"]), fmt(rd["revenue"]), r_conv])
+        # Другие регионы если есть
+        for reg_code, rd in regions_data.items():
+            if reg_code not in ["US", "AE", "TR", "KZ", "SA"]:
+                r_conv = int(rd["paid"] / rd["orders"] * 100) if rd["orders"] > 0 else 0
+                rows.append([reg_code, rd["orders"], len(rd["users"]), fmt(rd["revenue"]), r_conv])
+        rows.append(["", ""])
+
+        # СПОСОБЫ ОПЛАТЫ
+        rows.append(["═══ СПОСОБЫ ОПЛАТЫ ═══", ""])
+        for pm_name in ["ЮMoney", "OZON банк", "Crypto"]:
+            rows.append([f"{pm_name}:", payment_methods.get(pm_name, 0)])
+        # Другие способы если есть
+        for pm_name, count in payment_methods.items():
+            if pm_name not in ["ЮMoney", "OZON банк", "Crypto"]:
+                rows.append([f"{pm_name}:", count])
+
+        # === ЗАПИСЫВАЕМ ===
+        stats_ws.clear()
+        stats_ws.update(f"A1:E{len(rows)}", rows, value_input_option="RAW")
+
+        logger.info("✅ Лист 'Статистика' обновлён")
+
+    except Exception as e:
+        logger.error(f"⚠️ Ошибка обновления листа Статистика: {e}")
 
 
 PRICES = {
@@ -189,13 +373,78 @@ PRICES = {
     "apple_15000": 15000
 }
 
+# === ТАРИФЫ ГИФТ-КАРТ ПО РЕГИОНАМ (номинал, валюта, себестоимость в USDT) ===
+GIFT_CARD_TARIFFS = {
+    "TR": [
+        (25, "TL", 0.71),
+        (50, "TL", 1.42),
+        (100, "TL", 2.83),
+        (250, "TL", 6.84),
+        (1000, "TL", 27.36),
+    ],
+    "US": [
+        (5, "USD", 4.85),
+        (10, "USD", 9.70),
+        (25, "USD", 24.25),
+        (50, "USD", 48.50),
+        (100, "USD", 97.00),
+        (200, "USD", 194.00),
+        (300, "USD", 291.00),
+        (500, "USD", 495.00),
+    ],
+    "AE": [
+        (50, "AED", 13.34),
+        (100, "AED", 26.64),
+        (250, "AED", 66.62),
+        (500, "AED", 133.30),
+        (1000, "AED", 266.36),
+        (1500, "AED", 399.54),
+    ],
+    "SA": [
+        (50, "SAR", 13.21),
+        (100, "SAR", 26.07),
+        (200, "SAR", 52.43),
+        (300, "SAR", 78.40),
+        (500, "SAR", 130.83),
+        (750, "SAR", 195.00),
+        (1000, "SAR", 261.42),
+        (1500, "SAR", 392.00),
+        (2000, "SAR", 522.83),
+        (2500, "SAR", 653.42),
+    ],
+}
+
+REGION_DISPLAY = {
+    "KZ": "🇰🇿 Казахстан",
+    "TR": "🇹🇷 Турция",
+    "US": "🇺🇸 США",
+    "AE": "🇦🇪 ОАЭ",
+    "SA": "🇸🇦 Саудовская Аравия",
+}
+
+REGION_COMMISSION = {
+    "KZ": 1.15,
+    "TR": 1.10,
+    "US": 1.15,
+    "AE": 1.15,
+    "SA": 1.15,
+}
+
 ORDER_STATUSES = {
-    "new": "Новый",
+    "pending": "Ожидает оплаты",
     "paid": "Оплачен",
-    "processing": "В обработке",
     "completed": "Выполнен",
     "cancelled": "Отменён"
 }
+
+FAQ_KEYBOARD = [
+    [InlineKeyboardButton("🔹 Как работает сервис?", callback_data="faq_how")],
+    [InlineKeyboardButton("🔹 Сколько времени занимает?", callback_data="faq_time")],
+    [InlineKeyboardButton("🔹 Способы оплаты", callback_data="faq_payment")],
+    [InlineKeyboardButton("🔹 Какая комиссия?", callback_data="faq_commission")],
+    [InlineKeyboardButton("🔹 Что делать при проблемах?", callback_data="faq_problems")],
+    [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")]
+]
 
 
 rate_cache = {"value": None, "time": 0}
@@ -237,9 +486,10 @@ def generate_order():
         max_number = 1000
 
         # Проверяем Google Sheets
-        if sheet:
+        current_sheet = get_sheet()
+        if current_sheet:
             try:
-                records = sheet.get_all_records()
+                records = current_sheet.get_all_records()
                 if records:
                     last = records[-1].get("Номер ордера", "ORD-1000")
                     try:
@@ -251,7 +501,6 @@ def generate_order():
 
         # Проверяем локальную БД (на случай если в БД номер больше)
         try:
-            import sqlite3
             conn = sqlite3.connect("orders.db")
             c = conn.cursor()
             c.execute("SELECT order_number FROM orders ORDER BY id DESC LIMIT 1")
@@ -362,21 +611,20 @@ def add_order_to_sheet(order_data):
     """Добавляет заказ в таблицу и в БД"""
     try:
         # === ДОБАВЛЯЕМ В GOOGLE SHEETS ===
-        if sheet:
+        current_sheet = get_sheet()
+        if current_sheet:
             try:
-                from datetime import datetime
                 current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
-                sheet.append_row([
+                current_sheet.append_row([
                     order_data["number"],
                     order_data["user_id"],
                     order_data["username"],
-                    order_data["service"],
+                    order_data.get("region", "KZ"),
                     order_data["tariff"],
-                    order_data["kzt"],
                     order_data["rub"],
                     "",  # Способ оплаты - заполнится позже
                     current_date,
-                    ORDER_STATUSES["new"]
+                    ORDER_STATUSES["pending"]
                 ])
                 logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
             except Exception as e:
@@ -408,6 +656,10 @@ def add_order_to_sheet(order_data):
             return False
         
         logger.info(f"✅ Заказ {order_data['number']} добавлен в БД")
+        
+        # Обновляем лист статистики (в фоне)
+        _run_stats_update()
+        
         return True
         
     except Exception as e:
@@ -415,12 +667,13 @@ def add_order_to_sheet(order_data):
         return False
 
 def update_payment_method(order_number, payment_method):
-    """Записывает способ оплаты в Google Sheets (колонка H)"""
+    """Записывает способ оплаты в Google Sheets (колонка G)"""
     try:
-        if sheet:
-            cell = sheet.find(order_number)
+        current_sheet = get_sheet()
+        if current_sheet:
+            cell = current_sheet.find(order_number)
             if cell:
-                sheet.update_cell(cell.row, 8, payment_method)
+                current_sheet.update_cell(cell.row, 7, payment_method)
                 logger.info(f"✅ Способ оплаты {payment_method} записан для {order_number}")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка записи способа оплаты: {e}")
@@ -436,16 +689,21 @@ def update_order_status(order_number, new_status):
             return False
         
         # === ОБНОВЛЯЕМ В GOOGLE SHEETS (для совместимости) ===
-        if sheet:
+        current_sheet = get_sheet()
+        if current_sheet:
             try:
-                cell = sheet.find(order_number)
+                cell = current_sheet.find(order_number)
                 if cell:
-                    sheet.update_cell(cell.row, 10, new_status)
+                    current_sheet.update_cell(cell.row, 9, new_status)
                     logger.info(f"✅ Статус {order_number} обновлён в Google Sheets")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка обновления Google Sheets: {e}")
         
         logger.info(f"✅ Статус {order_number} изменён на {new_status}")
+        
+        # Обновляем лист статистики (в фоне)
+        _run_stats_update()
+        
         return True
         
     except Exception as e:
@@ -468,22 +726,22 @@ def cleanup_memory():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
     try:
-        # ReplyKeyboard под полем ввода
         reply_keyboard = ReplyKeyboardMarkup(
             [
-                [KeyboardButton("🍎 Пополнить Apple ID")],
-                [KeyboardButton("📋 Мои заказы")],
-                [KeyboardButton("❓ FAQ")]
+                [KeyboardButton("🍏 Пополнить Apple ID")],
+                [KeyboardButton("📋 Заказы"), KeyboardButton("❓ FAQ")]
             ],
             resize_keyboard=True
         )
         await update.message.reply_text(
-            "Добро пожаловать в Пополняшку 🍎!\n\n"
-            "Мы готовы помочь с пополнением твоего Apple ID!\n\n"
-            "Все, что для этого нужно — нажать \"🍎 Пополнить Apple ID\" ⬇️ и следовать дальнейшим инструкциям бота.\n\n"
-            "Есть вопросы? Можешь ознакомиться с нашим FAQ ⬇️\n\n"
-            "Если возникнут проблемы, мы всегда готовы прийти на помощь!\n\n"
-            "Приятной пополняшки 🥰",
+            "Рад видеть тебя! Я готов помочь с пополнением твоего Apple ID\n\n"
+            "Что для этого нужно?\n\n"
+            "1️⃣ Нажми \"🍏 Пополнить Apple ID\"\n"
+            "2️⃣ Выбери регион своего Apple ID и тариф\n"
+            "   (для Казахстана можно ввести свою сумму)\n"
+            "3️⃣ Выбери способ оплаты и оплати\n"
+            "4️⃣ Отправь данные менеджеру и жди пополнения\n\n"
+            "Всё проще, чем кажется! 😉",
             reply_markup=reply_keyboard
         )
         logger.info(f"Пользователь {update.message.from_user.id} запустил бот")
@@ -501,9 +759,9 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         keyboard = [
-            [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
+            [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
             [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-            [InlineKeyboardButton(" Изменить статус заказа", callback_data="admin_manage_orders")]
+            [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
         ]
         await update.message.reply_text(
             "⚙️ Админ панель",
@@ -547,11 +805,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not user_records:
                 await query.edit_message_text(
                     "📋 У вас пока нет заказов.\n\n"
-                    "Создайте новый заказ!",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🧾 Новый заказ", callback_data="new_order")],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
-                    ])
+                    "Нажми «🍏 Пополнить Apple ID» чтобы создать заказ."
                 )
                 logger.info(f"Пользователь {user_id} проверил заказы - нет заказов")
                 return
@@ -560,44 +814,44 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             for record in user_records:
                 order_num = record.get("Номер ордера", "N/A")
-                service = record.get("Услуга", "N/A")
                 tariff = record.get("Тариф", "N/A")
-                rub_amt = record.get("Цена RUB", "N/A")
-                status = record.get("Статус заявки", "Новый")
+                rub_amt = record.get("Сумма RUB", "N/A")
+                status = record.get("Статус", "Новый")
+                region = record.get("Регион", "")
+                region_display = REGION_DISPLAY.get(region, region) if region else "—"
                 
                 msg += (
                     f"🔹 {order_num}\n"
-                    f"   Сервис: {service}\n"
+                    f"   Регион: {region_display}\n"
                     f"   Тариф: {tariff}\n"
                     f"   Сумма: {rub_amt} ₽\n"
                     f"   Статус: {status}\n\n"
                 )
             
-            keyboard = [
-                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
-            ]
-            
-            await query.edit_message_text(
-                msg,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await query.edit_message_text(msg)
             logger.info(f"Пользователь {user_id} просмотрел {len(user_records)} заказов")
             return
         
         # === НАЗАД В ГЛАВНОЕ МЕНЮ ===
-        if query.data == "back_to_start":
+        if query.data == "back_to_start" or query.data == "new_order":
             keyboard = [
-                [InlineKeyboardButton("🍎 Пополнить Apple ID", callback_data="apple_topup")],
-                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")]
+                [InlineKeyboardButton("🍏 Пополнить Apple ID", callback_data="apple_topup")],
+                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
+                [InlineKeyboardButton("❓ FAQ", callback_data="faq_menu")]
             ]
             await query.edit_message_text(
-                "Добро пожаловать в Пополняшку 🍎!\n\n"
-                "Мы готовы помочь с пополнением твоего Apple ID!\n\n"
-                "Все, что для этого нужно — нажать \"🍎 Пополнить Apple ID\" ⬇️ и следовать дальнейшим инструкциям бота.\n\n"
-                "Есть вопросы? Можешь ознакомиться с нашим FAQ ⬇️\n\n"
-                "Если возникнут проблемы, мы всегда готовы прийти на помощь!\n\n"
-                "Приятной пополняшки 🥰",
+                "🍏 Главное меню\n\n"
+                "Выбери действие или используй кнопки внизу:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        # === FAQ МЕНЮ ===
+        if query.data == "faq_menu":
+            await query.edit_message_text(
+                "❓ Часто задаваемые вопросы\n\n"
+                "Выберите интересующий вопрос:",
+                reply_markup=InlineKeyboardMarkup(FAQ_KEYBOARD)
             )
             return
 
@@ -605,28 +859,32 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "faq_how":
             await query.edit_message_text(
                 "🔹 Как работает сервис?\n\n"
-                "Вы выбираете сумму пополнения, оплачиваете удобным способом, "
-                "отправляете скриншот оплаты и свою почту, к которой привязан ID, "
-                "и мы пополняем ваш Apple ID.\n\n"
-                "⚠️ Обращаем ваше внимание, что наш сервис пополняет Apple ID "
-                "гражданам РФ в казахской валюте KZT, для этого вам необходимо "
-                "сменить регион Apple ID на Казахстан.\n\n"
-                "📱 Как сменить регион:\n"
-                "1️⃣ Откройте «Настройки» → ваше имя → «Медиа и покупки»\n"
+                "Мы помогаем пополнить Apple ID граждан РФ методом смены региона.\n\n"
+                "🇰🇿 <b>Казахстан</b> — пополнение напрямую на ваш Apple ID. "
+                "Вы отправляете почту, привязанную к Apple ID, а мы отправляем "
+                "подарочный код для пополнения Apple ID.\n\n"
+                "<b>🇺🇸 США, 🇦🇪 ОАЭ, 🇹🇷 Турция, 🇸🇦 Саудовская Аравия</b> — мы отправляем "
+                "Gift Card (код) нужного номинала вам для активации через бот.\n\n"
+                "📱 Как сменить регион Apple ID:\n"
+                "1️⃣ Откройте «Настройки» → ваше имя → «Контент и покупки»\n"
                 "2️⃣ Нажмите «Просмотреть» → «Страна/регион»\n"
-                "3️⃣ Выберите «Казахстан»\n"
+                "3️⃣ Выберите нужную страну\n"
                 "4️⃣ Примите условия и подтвердите\n"
-                "5️⃣ Введите любой казахстанский адрес (можно найти в интернете)",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
+                "5️⃣ Введите любой адрес выбранной страны (можно найти в интернете)\n\n"
+                "Готово! Теперь вы можете пополнить Apple ID на любую сумму "
+                "и пользоваться доступными предложениями.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]]),
+                parse_mode="HTML"
             )
             return
 
         if query.data == "faq_time":
             await query.edit_message_text(
-                "🔹 Сколько времени занимает пополнение?\n\n"
-                "Обычно пополнение происходит в течение 15-30 минут после подтверждения оплаты. "
-                "В редких случаях может занять до нескольких часов. "
-                "Это может быть связано с техническими проблемами или большим количеством запросов.",
+                "🔹 Сколько времени занимает?\n\n"
+                "🇰🇿 Пополнение Apple ID (Казахстан) — 15-30 минут после подтверждения оплаты.\n\n"
+                "🎁 Gift Card (США, ОАЭ, Турция, СА) — до 15 минут. "
+                "Бот отправит вам код для пополнения Apple ID.\n\n"
+                "В редких случаях может занять больше времени из-за высокой нагрузки.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
             )
             return
@@ -634,12 +892,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "faq_payment":
             await query.edit_message_text(
                 "🔹 Какие способы оплаты доступны?\n\n"
-                "Наши услуги вы можете оплатить следующими способами:\n\n"
-                "• OZON банк (перевод по ссылке)\n"
                 "• ЮMoney (пополнение кошелька)\n"
-                "• Bybit (перевод по UID)\n"
-                "• С любой другой криптоплатформы по адресу кошелька TRON (TRC20), монета USDT\n\n"
-                "Мы работаем над увеличением способов оплаты.",
+                "• OZON банк (перевод по ссылке)\n"
+                "• Криптовалюта:\n"
+                "  — Bybit (перевод по UID)\n"
+                "  — Bybit (адрес, USDT BSC/BEP20)\n"
+                "  — Телеграм кошелёк (USDT TRC20)\n\n"
+                "⚠️ Для заказов свыше 8 500 ₽ доступна только оплата криптой.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
             )
             return
@@ -647,7 +906,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "faq_commission":
             await query.edit_message_text(
                 "🔹 Какая комиссия сервиса?\n\n"
-                "Комиссия за предоставленные услуги составляет 15% от суммы пополнения.",
+                "Комиссия зависит от региона:\n\n"
+                "🇰🇿 Казахстан — 15%\n"
+                "🇺🇸 США — 15%\n"
+                "🇦🇪 ОАЭ — 15%\n"
+                "🇸🇦 Саудовская Аравия — 15%\n"
+                "🇹🇷 Турция — 10%",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
             )
             return
@@ -656,11 +920,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "🔹 Что делать, если возникли проблемы?\n\n"
                 "Напишите нам — кнопка «Написать менеджеру» доступна в заказе, "
-                "или свяжитесь напрямую с поддержкой.",
+                "или свяжитесь напрямую с поддержкой.\n\n"
+                "📧 Для жалоб, предложений, сотрудничества и запросов в службу поддержки:\n"
+                "<code>popolnyaskaservice@icloud.com</code>",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/poplnyaska_halper")],
                     [InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]
-                ])
+                ]),
+                parse_mode="HTML"
             )
             return
 
@@ -676,35 +943,129 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if query.data == "back_to_faq":
-            keyboard = [
-                [InlineKeyboardButton("🔹 Как работает сервис?", callback_data="faq_how")],
-                [InlineKeyboardButton("🔹 Сколько времени занимает?", callback_data="faq_time")],
-                [InlineKeyboardButton("🔹 Способы оплаты", callback_data="faq_payment")],
-                [InlineKeyboardButton("🔹 Какая комиссия?", callback_data="faq_commission")],
-                [InlineKeyboardButton("🔹 Что делать при проблемах?", callback_data="faq_problems")],
-                [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")]
-            ]
             await query.edit_message_text(
                 "❓ Часто задаваемые вопросы\n\n"
                 "Выберите интересующий вопрос:",
+                reply_markup=InlineKeyboardMarkup(FAQ_KEYBOARD)
+            )
+            return
+
+        # === ПОПОЛНЕНИЕ APPLE ID — ВЫБОР РЕГИОНА ===
+        if query.data == "apple_topup":
+            keyboard = [
+                [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
+                [InlineKeyboardButton("🇦🇪 ОАЭ", callback_data="region_AE")],
+                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
+                [InlineKeyboardButton("🇸🇦 Саудовская Аравия", callback_data="region_SA")]
+            ]
+            await query.edit_message_text(
+                "🍏 Пополнение Apple ID\n\n"
+                "Выбери регион своего Apple ID:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
 
-        # === ПОПОЛНЕНИЕ APPLE ID ===
-        if query.data == "apple_topup":
+        # === РЕГИОН КАЗАХСТАН — ВЫБОР ТАРИФА ===
+        elif query.data == "region_KZ":
             keyboard = [
                 [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
                 [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
                 [InlineKeyboardButton("🍏 15 000 KZT", callback_data="apple_15000")],
                 [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
+                [InlineKeyboardButton("⬅️ Назад", callback_data="apple_topup")]
             ]
             await query.edit_message_text(
-                "🍎 Пополнение Apple ID\n\n"
-                "Выберите сумму пополнения:",
+                "🇰🇿 Казахстан — Пополнение Apple ID\n\n"
+                "Выбери сумму пополнения:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            return
+
+        # === РЕГИОНЫ С ГИФТ-КАРТАМИ — ВЫБОР ТАРИФА ===
+        elif query.data in ("region_TR", "region_AE", "region_SA", "region_US"):
+            region_code = query.data.replace("region_", "")
+            tariffs = GIFT_CARD_TARIFFS[region_code]
+            region_name = REGION_DISPLAY[region_code]
+
+            keyboard = []
+            for amount, currency, usdt_cost in tariffs:
+                keyboard.append([InlineKeyboardButton(
+                    f"🍏 {fmt(amount)} {currency}",
+                    callback_data=f"gc_{region_code}_{amount}"
+                )])
+            keyboard.append([InlineKeyboardButton("⬅️ Назад к регионам", callback_data="apple_topup")])
+
+            await query.edit_message_text(
+                f"{region_name} — Gift Card Apple\n\n"
+                "Выбери номинал гифт-карты:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        # === ВЫБОР ТАРИФА ГИФТ-КАРТЫ ===
+        elif query.data.startswith("gc_"):
+            parts = query.data.split("_")
+            region_code = parts[1]
+            amount = int(parts[2])
+
+            tariffs = GIFT_CARD_TARIFFS.get(region_code, [])
+            tariff_info = None
+            for t_amount, t_currency, t_usdt in tariffs:
+                if t_amount == amount:
+                    tariff_info = (t_amount, t_currency, t_usdt)
+                    break
+
+            if not tariff_info:
+                await query.edit_message_text("❗ Тариф не найден.")
+                return
+
+            t_amount, t_currency, t_usdt = tariff_info
+            user = query.from_user
+
+            can_create, spam_msg = check_spam(user.id)
+            if not can_create:
+                await query.answer(spam_msg, show_alert=True)
+                return
+
+            usdt_rate = get_usdt_rate()
+            commission = REGION_COMMISSION.get(region_code, 1.15)
+            commission_pct = round((commission - 1) * 100)
+            rub = int(t_usdt * usdt_rate * commission)
+            order_number = generate_order()
+
+            if not order_number:
+                await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
+                return
+
+            region_name = REGION_DISPLAY[region_code]
+            tariff_name = f"{fmt(t_amount)} {t_currency}"
+
+            context.user_data["order"] = {
+                "number": order_number,
+                "service": f"Gift Card ({region_name})",
+                "tariff": tariff_name,
+                "kzt": 0,
+                "rub": rub,
+                "region": region_code,
+                "user": user
+            }
+
+            keyboard = [
+                [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data=f"region_{region_code}")]
+            ]
+
+            await query.edit_message_text(
+                f"📦 Информация о заказе\n\n"
+                f"Номер заказа: <b>{order_number}</b>\n"
+                f"Регион: <b>{region_name}</b>\n"
+                f"Тариф: <b>{tariff_name} Gift Card</b>\n"
+                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия {commission_pct}%)",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+            logger.info(f"Пользователь {user.id} создал заказ {order_number} (Gift Card {region_code} {tariff_name})")
             return
 
         elif query.data == "apple_custom":
@@ -746,6 +1107,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "tariff": tariff_name,
                 "kzt": amount,
                 "rub": rub,
+                "region": "KZ",
                 "user": user
             }
 
@@ -799,7 +1161,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "service": order["service"],
                     "tariff": order["tariff"],
                     "kzt": order["kzt"],
-                    "rub": order["rub"]
+                    "rub": order["rub"],
+                    "region": order.get("region", "KZ")
                 }
                 
                 if not add_order_to_sheet(order_data):
@@ -818,7 +1181,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "service": order["service"],
                     "tariff": order["tariff"],
                     "kzt": order["kzt"],
-                    "rub": order["rub"]
+                    "rub": order["rub"],
+                    "region": order.get("region", "KZ")
                 }
 
                 payment_id = generate_payment_id()
@@ -833,28 +1197,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 context.user_data["current_order_number"] = order_number
 
-                # === ОТПРАВЛЯЕМ АДМИНУ ===
-                try:
-                    username_text = f'@{order["user"].username}' if order['user'].username else 'Нет'
-                    await context.bot.send_message(
-                        ADMIN_ID,
-                        f"🆕 Новый заказ ждёт оплаты\n\n"
-                        f"<b>📦 Информация о заказе:</b>\n"
-                        f"Номер: <b>{order['number']}</b>\n"
-                        f"Сервис: <b>{order['service']}</b>\n"
-                        f"Тариф: <b>{order['tariff']}</b>\n"
-                        f"Сумма: <b>{fmt(order['rub'])} ₽</b> ({fmt(order['kzt'])} KZT)\n\n"
-                        f"<b>👤 Клиент:</b> {order['user'].first_name or 'Неизвестно'} ({username_text})\n\n"
-                        f"<b>📊 Статус:</b> Новый (ожидание оплаты)",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения админу: {e}")
-
                 # === ВЫБОР СПОСОБА ОПЛАТЫ ===
                 usdt_rate = get_usdt_rate()
                 amount_usdt = round(order["rub"] / usdt_rate, 2)
                 context.user_data["amount_usdt"] = amount_usdt
+
+                if order["rub"] > 8500:
+                    pay_buttons = [
+                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
+                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
+                    ]
+                else:
+                    pay_buttons = [
+                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
+                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
+                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
+                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
+                    ]
 
                 await query.edit_message_text(
                     f"✅ Заявка сформирована!\n\n"
@@ -862,12 +1221,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Тариф: <b>{order['tariff']}</b>\n"
                     f"Сумма: <b>{fmt(order['rub'])} ₽</b> (~{amount_usdt} USDT)\n\n"
                     f"Выберите способ оплаты:",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
-                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
-                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(pay_buttons),
                     parse_mode="HTML"
                 )
                 logger.info(f"Заказ {order_number} — выбор способа оплаты")
@@ -940,7 +1294,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
                 parse_mode="HTML"
             )
-            update_payment_method(order_number, "OZON")
+            update_payment_method(order_number, "OZON банк")
             logger.info(f"Клиент {query.from_user.id} выбрал OZON банк для {order_number}")
 
         # === ОПЛАТА КРИПТОЙ ===
@@ -959,13 +1313,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💰 К оплате: <b>{amount_usdt} USDT</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"📲 <b>Способ 1: Bybit (перевод по UID)</b>\n"
-                f"1. Откройте приложение <b>Bybit</b>\n"
-                f"2. Перейдите в раздел <b>Перевод</b>\n"
-                f"3. Введите UID: <code>{BYBIT_UID}</code>\n"
-                f"4. Сумма: <b>{amount_usdt} USDT</b>\n\n"
-                f"📲 <b>Способ 2: TRC20 (любой кошелёк)</b>\n"
+                f"UID: <code>{BYBIT_UID}</code>\n"
+                f"Сумма: <b>{amount_usdt} USDT</b>\n\n"
+                f"📲 <b>Способ 2: Bybit (адрес)</b>\n"
+                f"Адрес: <code>{BSC_ADDRESS}</code>\n"
+                f"Сеть: <b>BSC (BEP20)</b> | Монета: <b>USDT</b>\n\n"
+                f"📲 <b>Способ 3: Телеграм кошелёк</b>\n"
                 f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
-                f"Сеть: <b>TRON (TRC20)</b>\n"
+                f"Сеть: <b>Tron (TRC20)</b> | Монета: <b>USDT</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
                 f"После перевода нажмите «✅ Я оплатил» и отправьте скриншот подтверждения.",
                 reply_markup=InlineKeyboardMarkup([
@@ -987,12 +1342,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Включаем режим ожидания скриншота
             AWAITING_SCREENSHOT[user_id] = order_number
 
+            order_info = ORDER_INFO_MAP.get(order_number, {})
+            region_display = REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', '—'))
+
             await query.edit_message_text(
-                f"⏳ Заявка на проверку отправлена!\n\n"
-                f"Заказ: <b>{order_number}</b>\n"
-                f"Сумма: <b>{amount_usdt} USDT</b>\n\n"
-                f"📸 <b>Отправьте скриншот подтверждения оплаты</b> прямо в этот чат.\n"
-                f"Скриншот будет автоматически переслан менеджеру.",
+                f"📸 <b>Отправьте скриншот оплаты</b>\n\n"
+                f"Для завершения оформления заказа отправьте скриншот "
+                f"подтверждения оплаты прямо в этот чат.\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Заказ: <b>{order_number}</b>\n"
+                f"🌍 Регион: <b>{region_display}</b>\n"
+                f"📱 Тариф: <b>{order_info.get('tariff', '—')}</b>\n"
+                f"💰 Сумма: <b>{amount_usdt} USDT</b>\n"
+                f"💳 Оплата: <b>Crypto</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏳ После получения скриншота заявка будет отправлена менеджеру на проверку.",
                 parse_mode="HTML"
             )
             logger.info(f"Клиент {user_id} нажал 'Я оплатил' (крипто) для {order_number}")
@@ -1007,12 +1371,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Включаем режим ожидания скриншота
             AWAITING_SCREENSHOT[user_id] = order_number
 
+            order_info = ORDER_INFO_MAP.get(order_number, {})
+            region_display = REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', '—'))
+
             await query.edit_message_text(
-                f"⏳ Заявка на проверку отправлена!\n\n"
-                f"Заказ: <b>{order_number}</b>\n"
-                f"Сумма: <b>{fmt(amount_rub)} ₽</b>\n\n"
-                f"📸 <b>Отправьте скриншот подтверждения оплаты</b> прямо в этот чат.\n"
-                f"Скриншот будет автоматически переслан менеджеру.",
+                f"📸 <b>Отправьте скриншот оплаты</b>\n\n"
+                f"Для завершения оформления заказа отправьте скриншот "
+                f"подтверждения оплаты прямо в этот чат.\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Заказ: <b>{order_number}</b>\n"
+                f"🌍 Регион: <b>{region_display}</b>\n"
+                f"📱 Тариф: <b>{order_info.get('tariff', '—')}</b>\n"
+                f"💰 Сумма: <b>{fmt(amount_rub)} ₽</b>\n"
+                f"💳 Оплата: <b>ЮMoney</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏳ После получения скриншота заявка будет отправлена менеджеру на проверку.",
                 parse_mode="HTML"
             )
             logger.info(f"Клиент {user_id} нажал 'Я оплатил' (ЮMoney) для {order_number}")
@@ -1027,12 +1400,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Включаем режим ожидания скриншота
             AWAITING_SCREENSHOT[user_id] = order_number
 
+            order_info = ORDER_INFO_MAP.get(order_number, {})
+            region_display = REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', '—'))
+
             await query.edit_message_text(
-                f"⏳ Заявка на проверку отправлена!\n\n"
-                f"Заказ: <b>{order_number}</b>\n"
-                f"Сумма: <b>{fmt(amount_rub)} ₽</b>\n\n"
-                f"📸 <b>Отправьте скриншот подтверждения оплаты</b> прямо в этот чат.\n"
-                f"Скриншот будет автоматически переслан менеджеру.",
+                f"📸 <b>Отправьте скриншот оплаты</b>\n\n"
+                f"Для завершения оформления заказа отправьте скриншот "
+                f"подтверждения оплаты прямо в этот чат.\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Заказ: <b>{order_number}</b>\n"
+                f"🌍 Регион: <b>{region_display}</b>\n"
+                f"📱 Тариф: <b>{order_info.get('tariff', '—')}</b>\n"
+                f"💰 Сумма: <b>{fmt(amount_rub)} ₽</b>\n"
+                f"💳 Оплата: <b>OZON банк</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏳ После получения скриншота заявка будет отправлена менеджеру на проверку.",
                 parse_mode="HTML"
             )
             logger.info(f"Клиент {user_id} нажал 'Я оплатил' (OZON) для {order_number}")
@@ -1046,14 +1428,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "❓ <b>Краткий FAQ</b>\n\n"
                 "💳 <b>Способы оплаты:</b>\n"
-                "• OZON банк (перевод по ссылке)\n"
                 "• ЮMoney (пополнение кошелька)\n"
-                "• Bybit (перевод по UID)\n"
-                "• USDT через TRON (TRC20)\n\n"
+                "• OZON банк (перевод по ссылке)\n"
+                "• Криптовалюта:\n"
+                "  — Bybit (перевод по UID)\n"
+                "  — Bybit (адрес, USDT BSC/BEP20)\n"
+                "  — Телеграм кошелёк (USDT TRC20)\n\n"
+                "⚠️ Для заказов свыше 8 500 ₽ доступна только оплата криптой.\n\n"
                 "⏱ <b>Сроки:</b>\n"
-                "Пополнение в течение 15-30 минут после подтверждения оплаты.\n\n"
-                "💰 <b>Комиссия:</b>\n"
-                "15% от суммы пополнения.\n\n"
+                "🇰🇿 Казахстан — 15-30 минут | 🎁 Gift Card — до 15 минут\n\n"
+                "💰 <b>Комиссия:</b> 15% (🇹🇷 Турция — 10%)\n\n"
                 "❓ <b>Проблемы с оплатой?</b>\n"
                 "Свяжитесь с поддержкой через кнопку ниже.",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1071,17 +1455,26 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             order = context.user_data.get("order")
             amount_usdt = context.user_data.get("amount_usdt", 0)
             if order:
+                if order['rub'] > 8500:
+                    pay_buttons = [
+                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
+                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
+                    ]
+                else:
+                    pay_buttons = [
+                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
+                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
+                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
+                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
+                    ]
+
                 await query.edit_message_text(
-                    f"✅ Заявка отправлена!\n\n"
+                    f"✅ Заявка сформирована!\n\n"
                     f"Номер заказа: <b>{order_number}</b>\n"
+                    f"Тариф: <b>{order['tariff']}</b>\n"
                     f"Сумма: <b>{fmt(order['rub'])} ₽</b> (~{amount_usdt} USDT)\n\n"
                     f"Выберите способ оплаты:",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
-                        [InlineKeyboardButton("💳 Оплатить через ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
-                        [InlineKeyboardButton("💎 Оплатить криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ Помощь", callback_data="help_payment")]
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(pay_buttons),
                     parse_mode="HTML"
                 )
             else:
@@ -1117,27 +1510,35 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if client_orders:
                 latest_order = client_orders[-1]
                 order_info = ORDER_INFO_MAP[latest_order]
+                region_code = order_info.get('region', 'KZ')
+                region_display = REGION_DISPLAY.get(region_code, region_code)
                 client_info += f"\n\n<b>📦 Последний заказ:</b>\n" \
                               f"Номер: <b>{latest_order}</b>\n" \
-                              f"Сервис: <b>{order_info['service']}</b>\n" \
+                              f"Регион: <b>{region_display}</b>\n" \
                               f"Тариф: <b>{order_info['tariff']}</b>\n" \
-                              f"Сумма: <b>{order_info['rub']} ₽</b> ({order_info['kzt']} KZT)"
-            elif sheet:
-                try:
-                    records = sheet.get_all_records()
-                    user_records = [r for r in records if str(r.get("User_ID", "")) == str(user_id)]
-                    if user_records:
-                        last = user_records[-1]
-                        client_info += f"\n\n<b>📦 Последний заказ:</b>\n" \
-                                      f"Номер: <b>{last.get('Номер ордера', 'N/A')}</b>\n" \
-                                      f"Услуга: <b>{last.get('Услуга', 'N/A')}</b>\n" \
-                                      f"Тариф: <b>{last.get('Тариф', 'N/A')}</b>\n" \
-                                      f"Сумма: <b>{last.get('Цена RUB', 'N/A')} ₽</b> ({last.get('Цена KZT', 'N/A')} KZT)\n" \
-                                      f"Статус: <b>{last.get('Статус заявки', 'N/A')}</b>"
-                    else:
-                        client_info += "\n\n📦 Заказов не найдено"
-                except Exception as e:
-                    logger.warning(f"Ошибка получения заказов из Sheets для contact_manager: {e}")
+                              f"Сумма: <b>{order_info['rub']} ₽</b>"
+            else:
+                _cm_sheet = get_sheet()
+                if _cm_sheet:
+                    try:
+                        records = _cm_sheet.get_all_records()
+                        user_records = [r for r in records if str(r.get("User_ID", "")) == str(user_id)]
+                        if user_records:
+                            last = user_records[-1]
+                            last_region = last.get('Регион', '')
+                            last_region_display = REGION_DISPLAY.get(last_region, last_region) if last_region else '—'
+                            client_info += f"\n\n<b>📦 Последний заказ:</b>\n" \
+                                          f"Номер: <b>{last.get('Номер ордера', 'N/A')}</b>\n" \
+                                          f"Регион: <b>{last_region_display}</b>\n" \
+                                          f"Тариф: <b>{last.get('Тариф', 'N/A')}</b>\n" \
+                                          f"Сумма: <b>{last.get('Сумма RUB', 'N/A')} ₽</b>\n" \
+                                          f"Статус: <b>{last.get('Статус', 'N/A')}</b>"
+                        else:
+                            client_info += "\n\n📦 Заказов не найдено"
+                    except Exception as e:
+                        logger.warning(f"Ошибка получения заказов из Sheets для contact_manager: {e}")
+                        client_info += "\n\n📦 Не удалось загрузить заказы"
+                else:
                     client_info += "\n\n📦 Не удалось загрузить заказы"
 
             try:
@@ -1159,13 +1560,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reason = parts[4] if len(parts) > 4 else "order"
 
             client_name = "Клиент"
-            client_service = None
+            client_region = None
             client_tariff = None
 
             for order_num, info in ORDER_INFO_MAP.items():
                 if info["user_id"] == client_id:
                     client_name = info["first_name"]
-                    client_service = info["service"]
+                    client_region = REGION_DISPLAY.get(info.get("region", ""), info.get("region", ""))
                     client_tariff = info["tariff"]
                     break
 
@@ -1174,7 +1575,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{client_name}</a> (ID: <code>{client_id}</code>)\n\n'
                     f"Клиент запросил связь с менеджером.\n"
                     f"Если у него есть заказ:\n"
-                    f"  • Сервис: {client_service or 'уточнить'}\n"
+                    f"  • Регион: {client_region or 'уточнить'}\n"
                     f"  • Тариф: {client_tariff or 'уточнить'}\n\n"
                     f"Напишите ему в личку и помогите!"
                 )
@@ -1183,7 +1584,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{client_name}</a> (ID: <code>{client_id}</code>)\n\n'
                     f"<b>📦 Заказ:</b>\n"
                     f"  • Номер: {reason}\n"
-                    f"  • Сервис: {client_service}\n"
+                    f"  • Регион: {client_region}\n"
                     f"  • Тариф: {client_tariff}\n\n"
                     f"Напишите ему об оплате или доступе."
                 )
@@ -1196,12 +1597,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ У вас нет доступа", show_alert=True)
                 return
             try:
-                sheet = get_sheet()
-                if not sheet:
+                current_sheet = get_sheet()
+                if not current_sheet:
                     await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
                     return
                 
-                values = sheet.get_all_values()
+                values = current_sheet.get_all_values()
             except Exception as e:
                 logger.error(f"Ошибка получения заказов: {e}")
                 await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
@@ -1216,17 +1617,18 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             msg = "📦 Последние заказы (последние 10):\n\n"
             for row in reversed(values[1:][-10:]):
-                if len(row) >= 10:
+                if len(row) >= 9:
                     order_num = row[0]
                     user_id = row[1]
-                    service = row[3]
+                    region = row[3]
                     tariff = row[4]
-                    rub_amt = row[6]
-                    status = row[9]
+                    rub_amt = row[5]
+                    status = row[8]
+                    region_display = REGION_DISPLAY.get(region, region)
                     
                     msg += f"🔹 <b>{order_num}</b>\n"
                     msg += f"   Статус: {status}\n"
-                    msg += f"   Сервис: {service}\n"
+                    msg += f"   Регион: {region_display}\n"
                     msg += f"   Тариф: {tariff}\n"
                     msg += f"   Сумма: {rub_amt} ₽\n"
                     msg += f"   ID: <code>{user_id}</code>\n\n"
@@ -1239,12 +1641,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if query.from_user.id != ADMIN_ID:
                 return
             try:
-                sheet = get_sheet()
-                if not sheet:
+                current_sheet = get_sheet()
+                if not current_sheet:
                     await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
                     return
                 
-                records = sheet.get_all_records()
+                records = current_sheet.get_all_records()
                 
                 total_orders = len(records)
                 unique_users = len(set(str(r.get("User_ID", "")) for r in records if r.get("User_ID")))
@@ -1252,19 +1654,34 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # По статусам
                 statuses = {}
                 for r in records:
-                    status = r.get("Статус заявки", "Неизвестен")
+                    status = r.get("Статус", "Неизвестен")
                     statuses[status] = statuses.get(status, 0) + 1
                 
+                # По регионам
+                regions = {}
+                for r in records:
+                    reg = r.get("Регион", "—")
+                    if not reg:
+                        reg = "—"
+                    regions[reg] = regions.get(reg, 0) + 1
+                
                 # Выручка (только выполненные)
-                revenue = sum(int(r.get("Цена RUB", 0) or 0) for r in records if r.get("Статус заявки") == "Выполнен")
-                total_kzt = sum(int(r.get("Цена KZT", 0) or 0) for r in records if r.get("Статус заявки") == "Выполнен")
+                revenue = sum(int(r.get("Сумма RUB", 0) or 0) for r in records if r.get("Статус") == "Выполнен")
+                
+                # Выручка по регионам (выполненные)
+                region_revenue = {}
+                for r in records:
+                    if r.get("Статус") == "Выполнен":
+                        reg = r.get("Регион", "—") or "—"
+                        rub_val = int(r.get("Сумма RUB", 0) or 0)
+                        region_revenue[reg] = region_revenue.get(reg, 0) + rub_val
                 
                 # Средний чек
-                completed = [r for r in records if r.get("Статус заявки") == "Выполнен"]
+                completed = [r for r in records if r.get("Статус") == "Выполнен"]
                 avg_check = int(revenue / len(completed)) if completed else 0
                 
                 # Конверсия
-                paid_count = statuses.get("Оплачен", 0) + statuses.get("Выполнен", 0)
+                paid_count = statuses.get("Оплачен", 0) + statuses.get("Выполнен", 0)  
                 conversion = int(paid_count / total_orders * 100) if total_orders > 0 else 0
                 
                 msg = (
@@ -1276,13 +1693,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for status, count in statuses.items():
                     msg += f"• {status}: <b>{count}</b>\n"
                 
+                msg += f"\n<b>🌍 ПО РЕГИОНАМ:</b>\n"
+                for reg, count in regions.items():
+                    reg_name = REGION_DISPLAY.get(reg, reg)
+                    msg += f"• {reg_name}: <b>{count}</b>\n"
+                
                 msg += (
                     f"\n<b>💰 ФИНАНСЫ:</b>\n"
                     f"• Выручка: <b>{fmt(revenue)} ₽</b>\n"
-                    f"• В KZT: <b>{fmt(total_kzt)} KZT</b>\n"
                     f"• Средний чек: <b>{fmt(avg_check)} ₽</b>\n"
-                    f"• Конверсия: <b>{conversion}%</b>"
+                    f"• Конверсия: <b>{conversion}%</b>\n"
                 )
+                
+                if region_revenue:
+                    msg += f"\n<b>💰 ВЫРУЧКА ПО РЕГИОНАМ:</b>\n"
+                    for reg, rev in region_revenue.items():
+                        reg_name = REGION_DISPLAY.get(reg, reg)
+                        msg += f"• {reg_name}: <b>{fmt(rev)} ₽</b>\n"
                 
                 await query.edit_message_text(
                     msg,
@@ -1299,12 +1726,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ У вас нет доступа", show_alert=True)
                 return
             try:
-                sheet = get_sheet()
-                if not sheet:
+                current_sheet = get_sheet()
+                if not current_sheet:
                     await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
                     return
                 
-                values = sheet.get_all_values()
+                values = current_sheet.get_all_values()
             except Exception as e:
                 logger.error(f"Ошибка получения заказов: {e}")
                 await query.edit_message_text("⚠️ Ошибка доступа к таблице.")
@@ -1320,16 +1747,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "🔄 Выберите заказ для изменения статуса:\n\n"
             keyboard = []
             for row in reversed(values[1:][-20:]):
-                if len(row) >= 10:
+                if len(row) >= 9:
                     order_num = row[0]
-                    service = row[3]
+                    region = row[3]
                     tariff = row[4]
-                    amount_kzt = row[5]
-                    status = row[9]
+                    rub_amt = row[5]
+                    status = row[8]
+                    region_display = REGION_DISPLAY.get(region, region)
                     # Скрываем выполненные и отменённые заказы
                     if status in ["Выполнен", "Отменён"]:
                         continue
-                    msg += f"🔹 <b>{order_num}</b> — {service} ({amount_kzt} KZT) — {status}\n"
+                    msg += f"🔹 <b>{order_num}</b> — {region_display} ({rub_amt} ₽) — {status}\n"
                     keyboard.append([InlineKeyboardButton(f"📝 {order_num}", callback_data=f"admin_select_order_{order_num}")])
             
             if not keyboard:
@@ -1352,16 +1780,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Получаем информацию о заказе из таблицы
             order_info = ""
             try:
-                sheet = get_sheet()
-                if sheet:
-                    values = sheet.get_all_values()
+                current_sheet = get_sheet()
+                if current_sheet:
+                    values = current_sheet.get_all_values()
                     for row in values[1:]:
-                        if len(row) >= 10 and row[0] == order_num:
-                            service = row[3]
+                        if len(row) >= 9 and row[0] == order_num:
+                            region = row[3]
                             tariff = row[4]
-                            amount_kzt = row[5]
-                            amount_rub = row[6]
-                            order_info = f"📦 Заказ: <b>{order_num}</b>\n🛒 Сервис: {service}\n📋 Тариф: {tariff}\n💰 Сумма: {amount_kzt} KZT ({amount_rub} ₽)\n\n"
+                            amount_rub = row[5]
+                            region_display = REGION_DISPLAY.get(region, region)
+                            order_info = f"📦 Заказ: <b>{order_num}</b>\n🌍 Регион: {region_display}\n📋 Тариф: {tariff}\n💰 Сумма: {amount_rub} ₽\n\n"
                             break
             except Exception as e:
                 logger.error(f"Ошибка получения информации о заказе: {e}")
@@ -1371,7 +1799,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = [
                 [InlineKeyboardButton("💰 Оплачен", callback_data=f"admin_set_status_{order_num}_paid")],
-                [InlineKeyboardButton("⏳ В обработке", callback_data=f"admin_set_status_{order_num}_processing")],
                 [InlineKeyboardButton("✅ Выполнен", callback_data=f"admin_set_status_{order_num}_completed")],
                 [InlineKeyboardButton("❌ Отменён", callback_data=f"admin_set_status_{order_num}_cancelled")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="admin_manage_orders")]
@@ -1402,9 +1829,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id = ORDER_USER_MAP.get(order_num)
                 if not user_id:
                     try:
-                        sheet = get_sheet()
-                        if sheet:
-                            values = sheet.get_all_values()
+                        current_sheet = get_sheet()
+                        if current_sheet:
+                            values = current_sheet.get_all_values()
                             for row in values[1:]:
                                 if len(row) >= 2 and row[0] == order_num:
                                     user_id = int(row[1])
@@ -1413,17 +1840,56 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"Ошибка получения user_id из таблицы: {e}")
                 
                 if user_id:
-                    status_messages = {
-                        "paid": "💰 Ваша оплата подтверждена! Заказ в обработке.\n\n📧 Пожалуйста, отправьте вашу почту Apple ID (email), на которую нужно выполнить пополнение:",
-                        "processing": "⏳ Ваш заказ обрабатывается. Ожидайте уведомления.",
-                        "completed": "✅ Ваш заказ выполнен! Спасибо за покупку.",
-                        "cancelled": "❌ Ваш заказ отменён. Если есть вопросы — свяжитесь с поддержкой."
-                    }
-                    client_message = status_messages.get(new_status, f"Статус заказа изменён на: {status_name}")
-                    
-                    # Если оплата подтверждена — запрашиваем почту
-                    if new_status == "paid":
+                    # Определяем тип заказа по региону (KZ или Gift Card)
+                    order_region = ""
+                    try:
+                        _sheet = get_sheet()
+                        if _sheet:
+                            _values = _sheet.get_all_values()
+                            for _row in _values[1:]:
+                                if len(_row) >= 4 and _row[0] == order_num:
+                                    order_region = _row[3]  # столбец "Регион"
+                                    break
+                    except Exception as e:
+                        logger.error(f"Ошибка определения региона заказа: {e}")
+
+                    is_gift_card = order_region in ("TR", "US", "AE", "SA")
+
+                    if new_status == "paid" and is_gift_card:
+                        # Gift Card регионы: не запрашиваем почту, ожидание кода
+                        client_message = (
+                            "💰 Ваша оплата подтверждена! Заказ в обработке.\n\n"
+                            "⏳ Ожидайте получения кода — бот отправит его вам.\n\n"
+                            "⚠️ <b>Обратите внимание:</b> после получения кода средства возврату не подлежат. "
+                            "При возникновении проблем обращайтесь в службу поддержки."
+                        )
+                        # Показываем админу кнопку для отправки кода
+                        try:
+                            admin_code_keyboard = [
+                                [InlineKeyboardButton("📤 Отправить код клиенту", callback_data=f"send_code_{order_num}_{user_id}")],
+                                [InlineKeyboardButton("💬 Связаться с клиентом", url=f"tg://user?id={user_id}")]
+                            ]
+                            await context.bot.send_message(
+                                ADMIN_ID,
+                                f"✅ Оплата подтверждена — Gift Card\n\n"
+                                f"📦 Заказ: <b>{order_num}</b>\n"
+                                f"🌍 Регион: {REGION_DISPLAY.get(order_region, order_region)}\n\n"
+                                f"📤 Нажмите кнопку ниже, чтобы отправить код клиенту:",
+                                reply_markup=InlineKeyboardMarkup(admin_code_keyboard),
+                                parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            logger.error(f"Ошибка отправки кнопки кода админу: {e}")
+                    elif new_status == "paid":
+                        # KZ: запрашиваем почту
+                        client_message = "💰 Ваша оплата подтверждена! Заказ в обработке.\n\n📧 Пожалуйста, отправьте вашу почту Apple ID (email), на которую нужно выполнить пополнение:"
                         AWAITING_EMAIL[user_id] = order_num
+                    else:
+                        status_messages = {
+                            "completed": "✅ Ваш заказ выполнен! Спасибо за покупку.",
+                            "cancelled": "❌ Ваш заказ отменён. Если есть вопросы — свяжитесь с поддержкой."
+                        }
+                        client_message = status_messages.get(new_status, f"Статус заказа изменён на: {status_name}")
                     
                     try:
                         await context.bot.send_message(
@@ -1452,6 +1918,30 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML"
                 )
 
+        # === ОТПРАВКА КОДА КЛИЕНТУ (Gift Card) ===
+        elif query.data.startswith("send_code_"):
+            if query.from_user.id != ADMIN_ID:
+                return
+            
+            parts = query.data.replace("send_code_", "").split("_")
+            order_num = parts[0]
+            client_id = int(parts[1]) if len(parts) > 1 else None
+            
+            if not client_id:
+                await query.edit_message_text("❌ Не удалось определить клиента.")
+                return
+            
+            # Ставим админа в режим ожидания ввода кода
+            AWAITING_CODE[ADMIN_ID] = {"order_num": order_num, "client_id": client_id}
+            
+            await query.edit_message_text(
+                f"📤 <b>Отправка кода</b>\n\n"
+                f"📦 Заказ: <b>{order_num}</b>\n\n"
+                f"Введите код Gift Card для отправки клиенту:",
+                parse_mode="HTML"
+            )
+            logger.info(f"Админ готовится отправить код для заказа {order_num}")
+
         # === ПОПОЛНЕНИЕ ПРОИЗВЕДЕНО (после получения почты) ===
         elif query.data.startswith("topup_done_"):
             if query.from_user.id != ADMIN_ID:
@@ -1472,7 +1962,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🎉 <b>Пополнение выполнено!</b>\n\n"
                         f"📦 Заказ: <b>{order_num}</b>\n\n"
                         f"✅ Ваш Apple ID успешно пополнен!\n"
-                        f"Спасибо, что воспользовались нашим сервисом! 🍎",
+                        f"Спасибо, что воспользовались нашим сервисом! 🍏",
                         parse_mode="HTML"
                     )
                 except Exception as e:
@@ -1490,9 +1980,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if query.from_user.id != ADMIN_ID:
                 return
             keyboard = [
-                [InlineKeyboardButton("� Общая статистика", callback_data="stats_general")],
+                [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
                 [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-                [InlineKeyboardButton(" Изменить статус заказа", callback_data="admin_manage_orders")]
+                [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
             ]
             await query.edit_message_text(
                 "⚙️ Админ панель",
@@ -1538,7 +2028,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=(
                     f"📸 <b>Скриншот оплаты!</b>\n\n"
                     f"<b>📦 Заказ:</b> {order_number}\n"
-                    f"<b>Сервис:</b> {order_info.get('service', 'N/A')}\n"
+                    f"<b>Регион:</b> {REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', 'N/A'))}\n"
                     f"<b>Тариф:</b> {order_info.get('tariff', 'N/A')}\n"
                     f"<b>Сумма:</b> {fmt(order_info.get('rub', 0))} ₽\n\n"
                     f"<b>👤 Клиент:</b>\n"
@@ -1549,7 +2039,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"admin_set_status_{order_number}_paid")],
                     [InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_set_status_{order_number}_cancelled")],
-                    [InlineKeyboardButton("✔️ Выполнен", callback_data=f"admin_set_status_{order_number}_completed")],
                     [InlineKeyboardButton("💬 Написать клиенту", url=f"tg://user?id={user_id}")]
                 ]),
                 parse_mode="HTML"
@@ -1580,6 +2069,45 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     try:
+        # === ОБРАБОТКА КОДА ОТ АДМИНА (Gift Card) ===
+        if user_id == ADMIN_ID and ADMIN_ID in AWAITING_CODE:
+            code_data = AWAITING_CODE[ADMIN_ID]
+            code_order = code_data["order_num"]
+            code_client = code_data["client_id"]
+            gift_code = text
+            
+            del AWAITING_CODE[ADMIN_ID]
+            
+            # Меняем статус на "Выполнен"
+            update_order_status(code_order, ORDER_STATUSES["completed"])
+            
+            # Отправляем код клиенту
+            try:
+                await context.bot.send_message(
+                    code_client,
+                    f"🎉 <b>Ваш код получен!</b>\n\n"
+                    f"📦 Заказ: <b>{code_order}</b>\n\n"
+                    f"🔑 Код Gift Card:\n<code>{gift_code}</code>\n\n"
+                    f"Активируйте код в App Store / iTunes.\n"
+                    f"Спасибо, что воспользовались нашим сервисом! 🍏",
+                    parse_mode="HTML"
+                )
+                logger.info(f"Код отправлен клиенту {code_client} для заказа {code_order}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки кода клиенту: {e}")
+                await update.message.reply_text(
+                    f"❌ Не удалось отправить код клиенту. Ошибка: {e}"
+                )
+                return
+            
+            await update.message.reply_text(
+                f"✅ Код отправлен клиенту!\n\n"
+                f"📦 Заказ: <b>{code_order}</b>\n"
+                f"📊 Статус: Выполнен",
+                parse_mode="HTML"
+            )
+            return
+
         # === ОБРАБОТКА ПОЧТЫ APPLE ID ===
         if user_id in AWAITING_EMAIL:
             order_number = AWAITING_EMAIL.get(user_id)
@@ -1595,6 +2123,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = user.full_name or "Без имени"
                 username = f"@{user.username}" if user.username else "Нет username"
                 
+                # Получаем информацию о заказе для админа
+                order_details = ""
+                try:
+                    _sheet = get_sheet()
+                    if _sheet:
+                        _values = _sheet.get_all_values()
+                        for _row in _values[1:]:
+                            if len(_row) >= 7 and _row[0] == order_number:
+                                region_display = REGION_DISPLAY.get(_row[3], _row[3])
+                                order_details = (
+                                    f"🌍 Регион: {region_display}\n"
+                                    f"📋 Тариф: {_row[4]}\n"
+                                    f"💰 Сумма: {_row[5]} ₽\n\n"
+                                )
+                                break
+                except Exception as e:
+                    logger.error(f"Ошибка получения деталей заказа: {e}")
+
                 # Уведомляем админа с кнопками
                 try:
                     admin_keyboard = [
@@ -1605,6 +2151,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         ADMIN_ID,
                         f"📧 <b>Получена почта Apple ID</b>\n\n"
                         f"📦 Заказ: <b>{order_number}</b>\n\n"
+                        f"{order_details}"
                         f"📧 Почта для пополнения:\n"
                         f"<code>{email}</code>\n\n"
                         f"👤 Клиент:\n"
@@ -1632,37 +2179,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         # === ОБРАБОТКА КНОПОК REPLY KEYBOARD ===
-        if text == "🍎 Пополнить Apple ID":
+        if text == "🍏 Пополнить Apple ID":
             keyboard = [
-                [InlineKeyboardButton("🍏 5 000 KZT", callback_data="apple_5000")],
-                [InlineKeyboardButton("🍏 10 000 KZT", callback_data="apple_10000")],
-                [InlineKeyboardButton("🍏 15 000 KZT", callback_data="apple_15000")],
-                [InlineKeyboardButton("✏️ Ввести свою сумму", callback_data="apple_custom")]
+                [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
+                [InlineKeyboardButton("🇦🇪 ОАЭ", callback_data="region_AE")],
+                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
+                [InlineKeyboardButton("🇸🇦 Саудовская Аравия", callback_data="region_SA")]
             ]
             await update.message.reply_text(
-                "🍎 Пополнение Apple ID\n\n"
-                "Выберите сумму пополнения:",
+                "🍏 Пополнение Apple ID\n\n"
+                "Выбери регион своего Apple ID:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
 
         if text == "❓ FAQ":
-            keyboard = [
-                [InlineKeyboardButton("🔹 Как работает сервис?", callback_data="faq_how")],
-                [InlineKeyboardButton("🔹 Сколько времени занимает?", callback_data="faq_time")],
-                [InlineKeyboardButton("🔹 Способы оплаты", callback_data="faq_payment")],
-                [InlineKeyboardButton("🔹 Какая комиссия?", callback_data="faq_commission")],
-                [InlineKeyboardButton("🔹 Что делать при проблемах?", callback_data="faq_problems")],
-                [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")]
-            ]
             await update.message.reply_text(
                 "❓ Часто задаваемые вопросы\n\n"
                 "Выберите интересующий вопрос:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(FAQ_KEYBOARD)
             )
             return
 
-        if text == "📋 Мои заказы":
+        if text == "📋 Заказы":
             try:
                 current_sheet = get_sheet()
                 if not current_sheet:
@@ -1680,7 +2220,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not user_records:
                 await update.message.reply_text(
                     "📋 У вас пока нет заказов.\n\n"
-                    "Нажмите «🍎 Пополнить Apple ID» чтобы создать заказ."
+                    "Нажми «🍏 Пополнить Apple ID» чтобы создать заказ."
                 )
                 return
             
@@ -1688,11 +2228,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for record in user_records:
                 order_num = record.get("Номер ордера", "N/A")
                 tariff = record.get("Тариф", "N/A")
-                rub_amt = record.get("Цена RUB", "N/A")
-                status = record.get("Статус заявки", "Новый")
+                rub_amt = record.get("Сумма RUB", "N/A")
+                status = record.get("Статус", "Ожидает оплаты")
+                region = record.get("Регион", "")
+                region_display = REGION_DISPLAY.get(region, region) if region else "—"
                 
                 msg += (
                     f"🔹 {order_num}\n"
+                    f"   Регион: {region_display}\n"
                     f"   Тариф: {tariff}\n"
                     f"   Сумма: {rub_amt} ₽\n"
                     f"   Статус: {status}\n\n"
@@ -1739,6 +2282,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "tariff": tariff_name,
                     "kzt": amount,
                     "rub": rub,
+                    "region": "KZ",
                     "user": user
                 }
 
