@@ -22,6 +22,7 @@ class Database:
     
     def init_db(self):
         """Инициализирует БД и создаёт таблицы"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
@@ -80,11 +81,13 @@ class Database:
             ''')
             
             conn.commit()
-            conn.close()
             logger.info("✅ База данных инициализирована")
             
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
+        finally:
+            if conn:
+                conn.close()
     
     def add_user(self, telegram_id: int, username: str = None, first_name: str = None) -> int:
         """Добавляет или обновляет пользователя"""
