@@ -39,12 +39,10 @@ def get_sheet():
         sheet = client.open("popolnyaska_bot").sheet1
         _sheet_cache["sheet"] = sheet
         _sheet_cache["time"] = now
-        logger.info("✅ Подключение к Google Sheets успешно")
+        logger.debug("Подключение к Google Sheets успешно")
         return sheet
     except Exception as e:
         logger.error(f"Ошибка подключения к Google Sheets: {e}")
-        _sheet_cache["sheet"] = None
-        _sheet_cache["time"] = 0
         return None
 
 
@@ -230,6 +228,8 @@ def add_order_to_sheet(order_data):
                         logger.warning(f"⚠️ gspread APIError (попытка {_attempt+1}/3): {e}")
                         import time as _time
                         _time.sleep(2 ** _attempt)
+                        _sheet_cache["sheet"] = None
+                        _sheet_cache["time"] = 0
                         current_sheet = get_sheet()
                     else:
                         logger.error(f"❌ gspread APIError после 3 попыток: {e}")

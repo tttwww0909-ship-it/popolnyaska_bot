@@ -4,6 +4,7 @@ Telegram-хэндлеры: команды, кнопки, обработка со
 
 import asyncio
 import logging
+from html import escape as html_escape
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import BadRequest
@@ -357,6 +358,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer(spam_msg, show_alert=True)
                 return
 
+            mark_order_created(user.id)
+
             usdt_rate = await asyncio.to_thread(get_usdt_rate)
             commission = REGION_COMMISSION.get(region_code, 1.15)
             commission_pct = round((commission - 1) * 100)
@@ -460,8 +463,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("⏳ Заказ уже обрабатывается. Подождите...")
                 return
 
+            ORDER_LOCK[order_number] = True
             try:
-                ORDER_LOCK[order_number] = True
                 ORDER_USER_MAP[order_number] = user_id
 
                 order_data = {
@@ -523,9 +526,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info(f"Заказ {order_number} — выбор способа оплаты")
             finally:
-                await asyncio.sleep(5)
-                if order_number in ORDER_LOCK:
-                    del ORDER_LOCK[order_number]
+                ORDER_LOCK.pop(order_number, None)
 
         # === ОПЛАТА ЮMONEY ===
         elif query.data.startswith("pay_yoomoney_"):
@@ -1292,7 +1293,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     code_client,
                     f"🎉 <b>Ваш код получен!</b>\n\n"
                     f"📦 Заказ: <b>{code_order}</b>\n\n"
-                    f"🔑 Код Gift Card:\n<code>{gift_code}</code>\n\n"
+                    f"🔑 Код Gift Card:\n<code>{html_escape(gift_code)}</code>\n\n"
                     f"Активируйте код в App Store / iTunes.\n"
                     f"Спасибо, что воспользовались нашим сервисом! 🍏",
                     parse_mode="HTML"
@@ -1330,6 +1331,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ПОЧТА APPLE ID ===
         if user_id in AWAITING_EMAIL:
             order_number = AWAITING_EMAIL.get(user_id)
+            if not order_number:
+                del AWAITING_EMAIL[user_id]
+                return
             email = text.lower()
 
             if "@" in email and "." in email:

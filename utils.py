@@ -133,7 +133,7 @@ def get_rate():
         rate = value / nominal
         rate_cache["value"] = rate
         rate_cache["time"] = time.time()
-        logger.info(f"Курс обновлён: {rate}")
+        logger.debug(f"Курс обновлён: {rate}")
         return rate
     except Exception as e:
         logger.error(f"Ошибка получения курса: {e}")
@@ -152,7 +152,7 @@ def get_usdt_rate():
         data = response.json()
         if data.get("retCode") == 0:
             price = float(data["result"]["list"][0]["lastPrice"])
-            logger.info(f"Курс USDT/RUB: {price}")
+            logger.debug(f"Курс USDT/RUB: {price}")
             return price
     except Exception as e:
         logger.warning(f"Ошибка получения курса USDT: {e}")

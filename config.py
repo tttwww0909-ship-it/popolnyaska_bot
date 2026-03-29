@@ -21,7 +21,7 @@ BYBIT_UID = os.getenv("BYBIT_UID", "")
 BSC_ADDRESS = os.getenv("BSC_ADDRESS", "")
 TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
 
-# Проверяем, что все переменные загружены
+# Проверяем критические переменные
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не установлен в .env файле!")
 if not ADMIN_ID:
@@ -43,6 +43,18 @@ logging.basicConfig(
     handlers=[file_handler, console_handler]
 )
 logger = logging.getLogger(__name__)
+
+# Проверяем платёжные реквизиты (предупреждения, не ошибки)
+if not YOOMONEY_WALLET:
+    logger.warning("⚠️ YOOMONEY_WALLET не установлен в .env")
+if not OZON_PAY_URL:
+    logger.warning("⚠️ OZON_PAY_URL не установлен в .env")
+if not BYBIT_UID:
+    logger.warning("⚠️ BYBIT_UID не установлен в .env")
+if not BSC_ADDRESS:
+    logger.warning("⚠️ BSC_ADDRESS не установлен в .env")
+if not TRC20_ADDRESS:
+    logger.warning("⚠️ TRC20_ADDRESS не установлен в .env")
 
 # Глушим HTTP-спам
 logging.getLogger("httpx").setLevel(logging.WARNING)
