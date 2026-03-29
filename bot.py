@@ -2116,6 +2116,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
+        # === ПЕРЕОТПРАВКА СКРИНШОТА ===
+        elif query.data.startswith("resend_screenshot_"):
+            order_number = query.data.replace("resend_screenshot_", "")
+            user_id = query.from_user.id
+            # Снова ставим пользователя в режим ожидания скриншота
+            AWAITING_SCREENSHOT[user_id] = order_number
+            await query.edit_message_text(
+                f"📸 <b>Отправьте новый скриншот</b>\n\n"
+                f"Заказ: <b>{order_number}</b>\n\n"
+                f"Отправьте скриншот подтверждения оплаты прямо в этот чат.",
+                parse_mode="HTML"
+            )
+            logger.info(f"Клиент {user_id} запросил переотправку скриншота для {order_number}")
+
         # === НАЗАД В АДМИН-ПАНЕЛЬ ===
         elif query.data == "back_to_admin":
             if query.from_user.id != ADMIN_ID:
@@ -2197,12 +2211,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка пересылки скриншота админу: {e}")
         
-        # Подтверждаем клиенту
+        # Подтверждаем клиенту с кнопкой замены скриншота
         await update.message.reply_text(
             f"✅ <b>Скриншот получен!</b>\n\n"
             f"Заказ: <b>{order_number}</b>\n\n"
             f"Ваш скриншот отправлен на проверку менеджеру.\n"
-            f"Ожидайте подтверждения оплаты.",
+            f"Ожидайте подтверждения оплаты.\n\n"
+            f"⚠️ Отправили не тот скриншот? Нажмите кнопку ниже.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📎 Отправить другой скриншот", callback_data=f"resend_screenshot_{order_number}")]
+            ]),
             parse_mode="HTML"
         )
         
