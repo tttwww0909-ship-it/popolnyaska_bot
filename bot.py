@@ -2135,7 +2135,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_crypto:
             amount_usdt = order_info.get('usdt', '?')
             sum_line = f"{amount_usdt} USDT"
-            payment_line = "💎 Bybit / Telegram кошелёк"
+            payment_line = "💎 Криптой (USDT)"
         else:
             sum_line = f"{fmt(order_info.get('rub', 0))} ₽"
             payment_line = order_info.get('payment_method', '—')
