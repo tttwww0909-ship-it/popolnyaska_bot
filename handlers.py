@@ -14,9 +14,10 @@ from config import (
     ADMIN_ID, PRICES, GIFT_CARD_TARIFFS, REGION_DISPLAY, REGION_COMMISSION,
     ORDER_STATUSES, FAQ_KEYBOARD, YOOMONEY_WALLET, OZON_PAY_URL,
     BYBIT_UID, BSC_ADDRESS, TRC20_ADDRESS,
+    GIFT_CARD_LABELS, REGION_DESCRIPTIONS, GIFT_CARD_HINTS,
 )
 from utils import (
-    fmt, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, check_spam, mark_order_created, generate_order,
+    fmt, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, smart_round, check_spam, mark_order_created, generate_order,
     cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
@@ -326,16 +327,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             region_code = query.data.replace("region_", "")
             tariffs = GIFT_CARD_TARIFFS[region_code]
             region_name = REGION_DISPLAY[region_code]
+            labels = GIFT_CARD_LABELS.get(region_code, {})
             keyboard = []
             for amount, currency, usdt_cost in tariffs:
+                label = labels.get(amount, f"{fmt(amount)} {currency}")
                 keyboard.append([InlineKeyboardButton(
-                    f"🍏 {fmt(amount)} {currency}",
+                    f"🍏 {label}",
                     callback_data=f"gc_{region_code}_{amount}"
                 )])
             keyboard.append([InlineKeyboardButton("⬅️ Назад к регионам", callback_data="apple_topup")])
+            region_desc = REGION_DESCRIPTIONS.get(region_code, "")
+            extra = f"\n\n{region_desc}" if region_desc else ""
             await query.edit_message_text(
-                f"{region_name} — Gift Card Apple\n\nВыбери номинал гифт-карты:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                f"{region_name} — Gift Card Apple\n\nВыбери номинал гифт-карты:{extra}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
             )
             return
 
@@ -368,7 +374,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             commission = get_us_commission(t_amount) if region_code == "US" else REGION_COMMISSION.get(region_code, 1.15)
             commission_pct = round((commission - 1) * 100)
-            rub = int(t_usdt * usdt_rate * commission)
+            rub = smart_round(int(t_usdt * usdt_rate * commission))
             order_number = await asyncio.to_thread(generate_order)
             if not order_number:
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -389,12 +395,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
                 [InlineKeyboardButton("❌ Отмена", callback_data=f"region_{region_code}")]
             ]
+            hint = GIFT_CARD_HINTS.get(region_code, {}).get(t_amount)
+            hint_line = f"\n💡 <i>Этого номинала хватит на: {hint}.</i>" if hint else ""
             await query.edit_message_text(
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
                 f"Регион: <b>{region_name}</b>\n"
                 f"Тариф: <b>{tariff_name} Gift Card</b>\n"
-                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия {commission_pct}%)",
+                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия {commission_pct}%)"
+                f"{hint_line}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )

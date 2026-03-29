@@ -185,6 +185,24 @@ def get_usdt_rate():
     return None
 
 
+def smart_round(price: int) -> int:
+    """Округление цены для страхового буфера.
+
+    До 2000 ₽: ceil до ближайших 10.
+    Свыше 2000 ₽: до ближайшего числа, оканчивающегося на 50 или 90.
+    Примеры: 1134 → 1150, 1862 → 1890, 2134 → 2150.
+    """
+    import math
+    if price <= 2000:
+        return math.ceil(price / 10) * 10
+    base = (price // 100) * 100
+    for suffix in (50, 90, 150, 190):
+        candidate = base + suffix
+        if candidate >= price:
+            return candidate
+    return price
+
+
 def get_us_commission(amount_usd: int) -> float:
     """Ступенчатая комиссия для US Gift Cards.
 
