@@ -2,11 +2,11 @@
 
 ## Инфраструктура
 - **Локальная папка:** `C:\Users\maksi\OneDrive\Desktop\popolnyaska_bot\`
-- **Сервер:** 178.104.42.42 (Hetzner VPS, root, пароль)
+- **Сервер:** см. .env (Hetzner VPS)
 - **Путь на сервере:** `/opt/popolnyaska-bot/`
 - **Systemd сервис:** `popolnyaska-bot.service`
 - **База данных:** SQLite (orders.db) — основной источник данных; Google Sheets — запись + лист Статистика
-- **Деплой:** `ssh root@178.104.42.42 "cd /opt/popolnyaska-bot && git pull && systemctl restart popolnyaska-bot"`
+- **Деплой:** `ssh <SERVER_IP> "cd /opt/popolnyaska-bot && git pull && systemctl restart popolnyaska-bot"`
 - **GitHub:** https://github.com/tttwww0909-ship-it/popolnyaska_bot
 
 ## Файлы проекта

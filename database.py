@@ -20,7 +20,7 @@ class Database:
         self.init_db()
 
     def _connect(self, row_factory=False):
-        conn = sqlite3.connect(self.db_file)
+        conn = sqlite3.connect(self.db_file, timeout=5)
         if row_factory:
             conn.row_factory = sqlite3.Row
         return conn
