@@ -8,7 +8,6 @@ from telegram.ext import (
 )
 
 from config import TOKEN, logger
-from database import db
 from handlers import (
     start, admin, reviews_command, buttons,
     photo_handler, text_handler, periodic_cleanup, error_handler,
@@ -16,8 +15,6 @@ from handlers import (
 
 
 def main():
-    db.init_db()
-
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
