@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 orders.db
 venv/
+backups/
+.pytest_cache/
+bot.log*

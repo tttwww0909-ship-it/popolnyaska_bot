@@ -1,0 +1,135 @@
+"""
+Конфигурация бота: переменные окружения, логирование, константы.
+"""
+
+import os
+import logging
+from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton
+
+# === ЗАГРУЖАЕМ ПЕРЕМЕННЫЕ ИЗ .env ===
+load_dotenv()
+
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "")
+
+# Платёжные реквизиты
+OZON_PAY_URL = os.getenv("OZON_PAY_URL", "")
+BYBIT_UID = os.getenv("BYBIT_UID", "")
+BSC_ADDRESS = os.getenv("BSC_ADDRESS", "")
+TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
+
+# Проверяем, что все переменные загружены
+if not TOKEN:
+    raise ValueError("❌ TELEGRAM_TOKEN не установлен в .env файле!")
+if not ADMIN_ID:
+    raise ValueError("❌ ADMIN_ID не установлен в .env файле!")
+
+# === ЛОГИРОВАНИЕ ===
+file_handler = RotatingFileHandler(
+    'bot.log', encoding='utf-8',
+    maxBytes=5*1024*1024,  # 5 MB
+    backupCount=3
+)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
+)
+logger = logging.getLogger(__name__)
+
+# Глушим HTTP-спам
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
+# === ТАРИФЫ ===
+PRICES = {
+    "apple_5000": 5000,
+    "apple_10000": 10000,
+    "apple_15000": 15000
+}
+
+GIFT_CARD_TARIFFS = {
+    "TR": [
+        (25, "TL", 0.71),
+        (50, "TL", 1.42),
+        (100, "TL", 2.83),
+        (250, "TL", 6.84),
+        (1000, "TL", 27.36),
+    ],
+    "US": [
+        (5, "USD", 4.85),
+        (10, "USD", 9.70),
+        (25, "USD", 24.25),
+        (50, "USD", 48.50),
+        (100, "USD", 97.00),
+        (200, "USD", 194.00),
+        (300, "USD", 291.00),
+        (500, "USD", 495.00),
+    ],
+    "AE": [
+        (50, "AED", 13.34),
+        (100, "AED", 26.64),
+        (250, "AED", 66.62),
+        (500, "AED", 133.30),
+        (1000, "AED", 266.36),
+        (1500, "AED", 399.54),
+    ],
+    "SA": [
+        (50, "SAR", 13.21),
+        (100, "SAR", 26.07),
+        (200, "SAR", 52.43),
+        (300, "SAR", 78.40),
+        (500, "SAR", 130.83),
+        (750, "SAR", 195.00),
+        (1000, "SAR", 261.42),
+        (1500, "SAR", 392.00),
+        (2000, "SAR", 522.83),
+        (2500, "SAR", 653.42),
+    ],
+}
+
+REGION_DISPLAY = {
+    "KZ": "🇰🇿 Казахстан",
+    "TR": "🇹🇷 Турция",
+    "US": "🇺🇸 США",
+    "AE": "🇦🇪 ОАЭ",
+    "SA": "🇸🇦 Саудовская Аравия",
+}
+
+REGION_COMMISSION = {
+    "KZ": 1.15,
+    "TR": 1.10,
+    "US": 1.15,
+    "AE": 1.15,
+    "SA": 1.15,
+}
+
+ORDER_STATUSES = {
+    "pending": "Ожидает оплаты",
+    "paid": "Оплачен",
+    "completed": "Выполнен",
+    "cancelled": "Отменён"
+}
+
+MONTH_NAMES = {
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+}
+
+FAQ_KEYBOARD = [
+    [InlineKeyboardButton("🔹 Как работает сервис?", callback_data="faq_how")],
+    [InlineKeyboardButton("🔹 Сколько времени занимает?", callback_data="faq_time")],
+    [InlineKeyboardButton("🔹 Способы оплаты", callback_data="faq_payment")],
+    [InlineKeyboardButton("🔹 Какая комиссия?", callback_data="faq_commission")],
+    [InlineKeyboardButton("🔹 Что делать при проблемах?", callback_data="faq_problems")],
+    [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")]
+]
