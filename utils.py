@@ -127,45 +127,61 @@ def fmt(num):
 
 # === КУРСЫ ВАЛЮТ ===
 rate_cache = {"value": None, "time": 0}
+usdt_cache = {"value": None, "time": 0}
+
+_CBR_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
+
+
+def _fetch_cbr() -> dict | None:
+    """Загружает JSON ЦБ РФ с кэшированием на уровне модуля."""
+    try:
+        return requests.get(_CBR_URL, timeout=10).json()
+    except Exception as e:
+        logger.error(f"Ошибка запроса ЦБ РФ: {e}")
+        return None
 
 
 def get_rate():
-    """Получение курса KZT to RUB"""
+    """Получение курса KZT → RUB (ЦБ РФ, кэш 1 ч)."""
     if time.time() - rate_cache["time"] < 3600 and rate_cache["value"] is not None:
         return rate_cache["value"]
-    try:
-        data = requests.get(
-            "https://www.cbr-xml-daily.ru/daily_json.js",
-            timeout=10
-        ).json()
-        value = data["Valute"]["KZT"]["Value"]
-        nominal = data["Valute"]["KZT"]["Nominal"]
-        rate = value / nominal
-        rate_cache["value"] = rate
-        rate_cache["time"] = time.time()
-        logger.debug(f"Курс обновлён: {rate}")
-        return rate
-    except Exception as e:
-        logger.error(f"Ошибка получения курса: {e}")
-        if rate_cache["value"] is not None:
-            return rate_cache["value"]
-        return 0.185
+    data = _fetch_cbr()
+    if data:
+        try:
+            value = data["Valute"]["KZT"]["Value"]
+            nominal = data["Valute"]["KZT"]["Nominal"]
+            rate = value / nominal
+            rate_cache["value"] = rate
+            rate_cache["time"] = time.time()
+            logger.debug(f"Курс KZT обновлён: {rate}")
+            return rate
+        except (KeyError, ZeroDivisionError) as e:
+            logger.error(f"Ошибка парсинга курса KZT: {e}")
+    if rate_cache["value"] is not None:
+        return rate_cache["value"]
+    return None
 
 
 def get_usdt_rate():
-    """Получает курс RUB/USDT"""
-    try:
-        response = requests.get(
-            "https://api.bybit.com/v5/market/tickers?category=spot&symbol=USDTRUB",
-            timeout=10
-        )
-        data = response.json()
-        if data.get("retCode") == 0:
-            price = float(data["result"]["list"][0]["lastPrice"])
-            logger.debug(f"Курс USDT/RUB: {price}")
+    """Получает курс USDT/RUB.
+
+    Источник — ЦБ РФ (USD/RUB), т.к. USDT ≈ USD с отклонением <0.5%.
+    Кэш 1 час.
+    """
+    if time.time() - usdt_cache["time"] < 3600 and usdt_cache["value"] is not None:
+        return usdt_cache["value"]
+    data = _fetch_cbr()
+    if data:
+        try:
+            price = data["Valute"]["USD"]["Value"]
+            usdt_cache["value"] = price
+            usdt_cache["time"] = time.time()
+            logger.debug(f"Курс USDT/RUB (via ЦБ USD): {price}")
             return price
-    except Exception as e:
-        logger.warning(f"Ошибка получения курса USDT: {e}")
+        except KeyError as e:
+            logger.error(f"Ошибка парсинга курса USD: {e}")
+    if usdt_cache["value"] is not None:
+        return usdt_cache["value"]
     return None
 
 
