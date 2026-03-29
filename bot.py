@@ -91,6 +91,13 @@ class TimedDict(dict):
         except KeyError:
             return default
     
+    def __contains__(self, key):
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
+    
     def cleanup(self):
         """Удаляет все устаревшие записи"""
         current_time = time.time()
@@ -192,12 +199,15 @@ def get_sheet():
 
 def _run_stats_update():
     """Запускает обновление статистики в фоновом потоке (не чаще раза в минуту)"""
-    global _last_stats_update
-    now = time.time()
-    if now - _last_stats_update < _STATS_UPDATE_MIN_INTERVAL:
-        return
-    _last_stats_update = now
-    threading.Thread(target=update_stats_sheet, daemon=True).start()
+    try:
+        global _last_stats_update
+        now = time.time()
+        if now - _last_stats_update < _STATS_UPDATE_MIN_INTERVAL:
+            return
+        _last_stats_update = now
+        threading.Thread(target=update_stats_sheet, daemon=True).start()
+    except Exception as e:
+        logger.error(f"Ошибка запуска обновления статистики: {e}")
 
 MONTH_NAMES = {
     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
@@ -509,7 +519,7 @@ def generate_order():
 
 async def _get_user_orders_msg(telegram_id: int) -> tuple:
     """Возвращает (ok, msg) с заказами пользователя из SQLite"""
-    orders = db.get_user_orders_by_telegram_id(telegram_id)
+    orders = await asyncio.to_thread(db.get_user_orders_by_telegram_id, telegram_id)
     if not orders:
         return False, "📋 У вас пока нет заказов."
     msg = "📋 <b>Ваши заказы:</b>\n\n"
@@ -569,29 +579,39 @@ def get_usdt_rate():
 def add_order_to_sheet(order_data):
     """Добавляет заказ в таблицу и в БД"""
     try:
-        # === ДОБАВЛЯЕМ В GOOGLE SHEETS ===
+        # === ДОБАВЛЯЕМ В GOOGLE SHEETS (с retry) ===
         current_sheet = get_sheet()
         if current_sheet:
-            try:
-                current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
-                current_sheet.append_row([
-                    order_data["number"],
-                    order_data["user_id"],
-                    order_data["username"],
-                    order_data.get("region", "KZ"),
-                    order_data["tariff"],
-                    order_data["rub"],
-                    "",  # Способ оплаты - заполнится позже
-                    current_date,
-                    ORDER_STATUSES["pending"]
-                ])
-                # Кэшируем номер строки чтобы не делать find() при обновлениях
-                added_cell = current_sheet.find(order_data["number"])
-                if added_cell:
-                    db.set_order_sheets_row(order_data["number"], added_cell.row)
-                logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка добавления в Google Sheets: {e}")
+            for _attempt in range(3):
+                try:
+                    current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+                    current_sheet.append_row([
+                        order_data["number"],
+                        order_data["user_id"],
+                        order_data["username"],
+                        order_data.get("region", "KZ"),
+                        order_data["tariff"],
+                        order_data["rub"],
+                        "",  # Способ оплаты - заполнится позже
+                        current_date,
+                        ORDER_STATUSES["pending"]
+                    ])
+                    # Кэшируем номер строки чтобы не делать find() при обновлениях
+                    added_cell = current_sheet.find(order_data["number"])
+                    if added_cell:
+                        db.set_order_sheets_row(order_data["number"], added_cell.row)
+                    logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
+                    break
+                except gspread.exceptions.APIError as e:
+                    if _attempt < 2:
+                        logger.warning(f"⚠️ gspread APIError (попытка {_attempt+1}/3): {e}")
+                        time.sleep(2 ** _attempt)
+                        current_sheet = get_sheet()
+                    else:
+                        logger.error(f"❌ gspread APIError после 3 попыток: {e}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка добавления в Google Sheets: {e}")
+                    break
         
         # === ДОБАВЛЯЕМ В ЛОКАЛЬНУЮ БД (ГЛАВНОЕ!) ===
         user_id = db.add_user(
@@ -697,6 +717,21 @@ def cleanup_memory():
         logger.error(f"Ошибка при очистке памяти: {e}")
 
 
+def _find_order_user_in_sheets(order_num):
+    """Ищет telegram_id и region заказа в Google Sheets (для fallback)"""
+    try:
+        current_sheet = get_sheet()
+        if current_sheet:
+            cell = current_sheet.find(order_num)
+            if cell:
+                row_vals = current_sheet.row_values(cell.row)
+                if len(row_vals) >= 4:
+                    return int(row_vals[1]), row_vals[3]
+    except Exception as e:
+        logger.error(f"Ошибка получения user_id из Sheets: {e}")
+    return None, ""
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
     try:
@@ -752,7 +787,7 @@ async def reviews_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет доступа.")
         return
 
-    reviews = db.get_all_reviews()
+    reviews = await asyncio.to_thread(db.get_all_reviews)
     if not reviews:
         await update.message.reply_text("📭 Отзывов пока нет.")
         return
@@ -991,11 +1026,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer(spam_msg, show_alert=True)
                 return
 
-            usdt_rate = get_usdt_rate()
+            usdt_rate = await asyncio.to_thread(get_usdt_rate)
             commission = REGION_COMMISSION.get(region_code, 1.15)
             commission_pct = round((commission - 1) * 100)
             rub = int(t_usdt * usdt_rate * commission)
-            order_number = generate_order()
+            order_number = await asyncio.to_thread(generate_order)
 
             if not order_number:
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -1049,14 +1084,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             amount = PRICES[query.data]
-            rate = get_rate()
+            rate = await asyncio.to_thread(get_rate)
             
             if not rate:
                 await query.edit_message_text("❌ Ошибка получения курса. Попробуйте позже.")
                 return
             
             rub = int(amount * rate * 1.15)
-            order_number = generate_order()
+            order_number = await asyncio.to_thread(generate_order)
             
             if not order_number:
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -1127,7 +1162,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "region": order.get("region", "KZ")
                 }
                 
-                if not add_order_to_sheet(order_data):
+                if not await asyncio.to_thread(add_order_to_sheet, order_data):
                     await query.edit_message_text("❌ Ошибка сохранения заказа. Попробуйте позже.")
                     return
                 
@@ -1135,7 +1170,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mark_order_created(user_id)
 
                 # === СОХРАНЯЕМ ИНФОРМАЦИЮ О ЗАКАЗЕ ===
-                usdt_rate = get_usdt_rate()
+                usdt_rate = await asyncio.to_thread(get_usdt_rate)
                 amount_usdt = round(order["rub"] / usdt_rate, 2)
                 context.user_data["amount_usdt"] = amount_usdt
 
@@ -1214,7 +1249,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
                 parse_mode="HTML"
             )
-            update_payment_method(order_number, "ЮMoney")
+            await asyncio.to_thread(update_payment_method, order_number, "ЮMoney")
             if order_number in ORDER_INFO_MAP:
                 ORDER_INFO_MAP[order_number]['payment_method'] = 'ЮMoney'
             logger.info(f"Клиент {query.from_user.id} выбрал ЮMoney для {order_number}")
@@ -1248,7 +1283,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
                 parse_mode="HTML"
             )
-            update_payment_method(order_number, "OZON банк")
+            await asyncio.to_thread(update_payment_method, order_number, "OZON банк")
             if order_number in ORDER_INFO_MAP:
                 ORDER_INFO_MAP[order_number]['payment_method'] = 'OZON банк'
             logger.info(f"Клиент {query.from_user.id} выбрал OZON банк для {order_number}")
@@ -1285,7 +1320,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
                 parse_mode="HTML"
             )
-            update_payment_method(order_number, "Crypto")
+            await asyncio.to_thread(update_payment_method, order_number, "Crypto")
             if order_number in ORDER_INFO_MAP:
                 ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto'
             logger.info(f"Клиент {query.from_user.id} выбрал крипто-оплату для {order_number}")
@@ -1476,7 +1511,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               f"Тариф: <b>{order_info['tariff']}</b>\n" \
                               f"Сумма: <b>{order_info['rub']} ₽</b>"
             else:
-                user_orders = db.get_user_orders_by_telegram_id(user_id)
+                user_orders = await asyncio.to_thread(db.get_user_orders_by_telegram_id, user_id)
                 if user_orders:
                     last = user_orders[0]  # Уже отсортированы DESC
                     client_info += f"\n\n<b>📦 Последний заказ:</b>\n" \
@@ -1543,7 +1578,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ У вас нет доступа", show_alert=True)
                 return
 
-            orders = db.get_recent_orders(10)
+            orders = await asyncio.to_thread(db.get_recent_orders, 10)
             if not orders:
                 await query.edit_message_text(
                     "📦 Нет заказов пока.",
@@ -1576,7 +1611,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if query.from_user.id != ADMIN_ID:
                 return
             try:
-                stats = db.get_admin_stats()
+                stats = await asyncio.to_thread(db.get_admin_stats)
                 if not stats:
                     await query.edit_message_text("⚠️ Ошибка получения статистики.")
                     return
@@ -1612,7 +1647,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ У вас нет доступа", show_alert=True)
                 return
 
-            orders = db.get_active_orders(20)
+            orders = await asyncio.to_thread(db.get_active_orders, 20)
             if not orders:
                 await query.edit_message_text(
                     "📦 Нет активных заказов для изменения статуса.",
@@ -1642,7 +1677,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Получаем информацию о заказе из SQLite
             order_info = ""
-            order_db = db.get_order(order_num)
+            order_db = await asyncio.to_thread(db.get_order, order_num)
             if order_db:
                 order_info = (
                     f"📦 Заказ: <b>{order_num}</b>\n"
@@ -1677,42 +1712,37 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_status = parts[1]
             status_name = ORDER_STATUSES.get(new_status, new_status)
             
-            success = update_order_status(order_num, status_name)
+            success = await asyncio.to_thread(update_order_status, order_num, status_name)
             
             if success:
                 # Получаем user_id из памяти или SQLite
                 user_id = ORDER_USER_MAP.get(order_num)
                 order_region = ""
-                if not user_id:
-                    order_db_info = db.get_order(order_num)
-                    if order_db_info:
-                        # user_id в orders — internal id, нужен telegram_id
-                        user_obj = db.get_user(order_db_info['user_id']) if order_db_info.get('user_id') else None
-                        # get_user принимает telegram_id, но нам нужен обратный путь
-                        # Используем прямой SQL запрос через get_recent_orders или ORDER_INFO_MAP
-                        pass
+                
+                if user_id:
+                    info = ORDER_INFO_MAP.get(order_num, {})
+                    order_region = info.get('region', '')
+                else:
                     # Пробуем ORDER_INFO_MAP
                     info = ORDER_INFO_MAP.get(order_num, {})
                     if info:
                         user_id = info.get('user_id')
                         order_region = info.get('region', '')
-                    else:
-                        # Фоллбэк: ищем telegram_id через Google Sheets
-                        try:
-                            current_sheet = get_sheet()
-                            if current_sheet:
-                                cell = current_sheet.find(order_num)
-                                if cell:
-                                    row_vals = current_sheet.row_values(cell.row)
-                                    if len(row_vals) >= 4:
-                                        user_id = int(row_vals[1])
-                                        order_region = row_vals[3]
-                        except Exception as e:
-                            logger.error(f"Ошибка получения user_id: {e}")
-                else:
-                    info = ORDER_INFO_MAP.get(order_num, {})
-                    order_region = info.get('region', '')
-
+                    
+                    # Пробуем SQLite (JOIN orders+users)
+                    if not user_id:
+                        user_id = await asyncio.to_thread(db.get_telegram_id_for_order, order_num)
+                    
+                    # Фоллбэк: ищем telegram_id через Google Sheets
+                    if not user_id:
+                        sheets_uid, sheets_region = await asyncio.to_thread(_find_order_user_in_sheets, order_num)
+                        if sheets_uid:
+                            user_id = sheets_uid
+                        if not order_region and sheets_region:
+                            order_region = sheets_region
+                
+                # === Уведомление клиента (независимо от источника user_id) ===
+                if user_id:
                     is_gift_card = order_region in ("TR", "US", "AE", "SA")
 
                     if new_status == "paid" and is_gift_card:
@@ -1773,12 +1803,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 reply_markup=InlineKeyboardMarkup(rating_keyboard)
                             )
                         else:
-                            review_markup = None
                             await context.bot.send_message(
                                 user_id,
                                 f"📦 <b>Заказ {order_num}</b>\n\n{client_message}",
-                                parse_mode="HTML",
-                                reply_markup=review_markup
+                                parse_mode="HTML"
                             )
                         logger.info(f"Клиент {user_id} уведомлён о статусе {status_name}")
                     except Exception as e:
@@ -1835,7 +1863,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             client_id = int(parts[1]) if len(parts) > 1 else None
             
             # Меняем статус на "Выполнен"
-            update_order_status(order_num, ORDER_STATUSES["completed"])
+            await asyncio.to_thread(update_order_status, order_num, ORDER_STATUSES["completed"])
             
             # Уведомляем клиента
             if client_id:
@@ -1898,7 +1926,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username = query.from_user.username or query.from_user.full_name or "Аноним"
             if user_id in AWAITING_REVIEW_COMMENT:
                 del AWAITING_REVIEW_COMMENT[user_id]
-            review_id = db.add_review(user_id, username, order_num, rating, None)
+            review_id = await asyncio.to_thread(db.add_review, user_id, username, order_num, rating, None)
             stars = "⭐" * rating
             await send_review_for_moderation(context.bot, review_id, user_id, username, order_num, rating, None)
             await query.edit_message_text(
@@ -2047,7 +2075,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del AWAITING_CODE[ADMIN_ID]
             
             # Меняем статус на "Выполнен"
-            update_order_status(code_order, ORDER_STATUSES["completed"])
+            await asyncio.to_thread(update_order_status, code_order, ORDER_STATUSES["completed"])
             
             # Отправляем код клиенту
             try:
@@ -2112,7 +2140,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Получаем информацию о заказе для админа
                 order_details = ""
-                order_db_data = db.get_order(order_number)
+                order_db_data = await asyncio.to_thread(db.get_order, order_number)
                 if order_db_data:
                     order_details = (
                         f"📋 Тариф: {order_db_data.get('tariff', '—')}\n"
@@ -2164,7 +2192,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comment = text
             username = update.message.from_user.username or update.message.from_user.full_name or "Аноним"
             del AWAITING_REVIEW_COMMENT[user_id]
-            review_id = db.add_review(user_id, username, order_num, rating, comment)
+            review_id = await asyncio.to_thread(db.add_review, user_id, username, order_num, rating, comment)
             stars = "⭐" * rating
             await send_review_for_moderation(context.bot, review_id, user_id, username, order_num, rating, comment)
             await update.message.reply_text(
@@ -2219,13 +2247,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(spam_msg)
                     return
 
-                rate = get_rate()
+                rate = await asyncio.to_thread(get_rate)
                 if not rate:
                     await update.message.reply_text("❌ Ошибка получения курса. Попробуйте позже.")
                     return
                 
                 rub = int(amount * rate * 1.15)
-                order_number = generate_order()
+                order_number = await asyncio.to_thread(generate_order)
                 
                 if not order_number:
                     await update.message.reply_text("❌ Ошибка генерации заказа. Попробуйте позже.")

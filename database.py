@@ -621,5 +621,26 @@ class Database:
                 conn.close()
 
 
+    def get_telegram_id_for_order(self, order_number: str) -> Optional[int]:
+        """Получает telegram_id клиента по номеру заказа (JOIN orders+users)"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute('''
+                SELECT u.telegram_id FROM orders o
+                JOIN users u ON o.user_id = u.id
+                WHERE o.order_number = ?
+            ''', (order_number,))
+            result = c.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения telegram_id для заказа: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+
 # Создаём глобальный объект БД
 db = Database()
