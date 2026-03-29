@@ -193,6 +193,21 @@ class Database:
             logger.error(f"❌ Ошибка получения sheets_row: {e}")
             return None
 
+    def update_order_amount(self, order_number: str, new_amount_rub: int) -> bool:
+        """Обновляет сумму заказа в рублях (например, при VIP-скидке)"""
+        try:
+            with self._connect() as conn:
+                c = conn.cursor()
+                c.execute('''UPDATE orders SET amount_rub = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE order_number = ?''', (new_amount_rub, order_number))
+                if c.rowcount == 0:
+                    return False
+                logger.info(f"✅ Сумма {order_number} обновлена на {new_amount_rub} ₽")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления суммы: {e}")
+            return False
+
     def update_order_status(self, order_number: str, new_status: str) -> bool:
         """Обновляет статус заказа"""
         try:

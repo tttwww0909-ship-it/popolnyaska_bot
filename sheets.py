@@ -268,6 +268,25 @@ def add_order_to_sheet(order_data):
         return False
 
 
+def update_order_amount_in_sheet(order_number, new_amount_rub):
+    """Обновляет сумму RUB в БД и Google Sheets (колонка F) — для VIP-скидки"""
+    try:
+        db.update_order_amount(order_number, new_amount_rub)
+        current_sheet = get_sheet()
+        if current_sheet:
+            row = db.get_order_sheets_row(order_number)
+            if row:
+                current_sheet.update_cell(row, 6, new_amount_rub)
+            else:
+                cell = current_sheet.find(order_number)
+                if cell:
+                    current_sheet.update_cell(cell.row, 6, new_amount_rub)
+                    db.set_order_sheets_row(order_number, cell.row)
+            logger.info(f"✅ Сумма {order_number} обновлена в Sheets: {new_amount_rub} ₽")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка обновления суммы в Sheets: {e}")
+
+
 def update_payment_method(order_number, payment_method):
     """Записывает способ оплаты в Google Sheets (колонка G)"""
     try:

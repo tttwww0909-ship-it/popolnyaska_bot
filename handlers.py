@@ -21,7 +21,7 @@ from utils import (
     cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
-from sheets import add_order_to_sheet, update_payment_method, update_order_status, find_order_user_in_sheets
+from sheets import add_order_to_sheet, update_payment_method, update_order_status, update_order_amount_in_sheet, find_order_user_in_sheets
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -54,13 +54,13 @@ async def send_review_for_moderation(bot, review_id: int, user_id: int, username
                                       order_num: str, rating: int, comment: str | None):
     """Отправляет отзыв админу для информации"""
     stars = "⭐" * rating
-    comment_text = f"\n💬 Комментарий: <i>{comment}</i>" if comment else ""
+    comment_text = f"\n💬 Комментарий: <i>{html_escape(comment)}</i>" if comment else ""
     try:
         await bot.send_message(
             ADMIN_ID,
             f"⭐ <b>Новый отзыв</b>\n\n"
             f"📦 Заказ: <b>{order_num}</b>\n"
-            f"👤 Клиент: @{username} (ID: <code>{user_id}</code>)\n"
+            f"👤 Клиент: @{html_escape(username)} (ID: <code>{user_id}</code>)\n"
             f"Оценка: {stars}"
             f"{comment_text}",
             parse_mode="HTML"
@@ -140,10 +140,10 @@ async def reviews_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"⭐ <b>Отзывы ({i+1}–{min(i+chunk_size, total)} из {total})</b>\n\n"
         for r in chunk:
             stars = "⭐" * r["rating"]
-            comment = f"\n💬 <i>{r['comment']}</i>" if r.get("comment") else ""
+            comment = f"\n💬 <i>{html_escape(r['comment'])}</i>" if r.get("comment") else ""
             date = str(r.get("created_at", ""))[:10]
             text += (
-                f"<b>{r['order_number']}</b> · @{r['username']} · {date}\n"
+                f"<b>{r['order_number']}</b> · @{html_escape(r.get('username', ''))} · {date}\n"
                 f"{stars}{comment}\n"
                 f"{'─' * 20}\n"
             )
@@ -407,6 +407,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
                 [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
             ]
+            context.user_data.pop("awaiting_apple", None)
             await query.edit_message_text(
                 "🍏 Пополнение Apple ID\n\nВыбери регион своего Apple ID:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
@@ -542,7 +543,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             commission = get_kz_commission(amount)
             commission_pct = round((commission - 1) * 100)
-            rub = int(amount * rate * commission)
+            rub = smart_round(int(amount * rate * commission))
             order_number = await asyncio.to_thread(generate_order)
             if not order_number:
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -756,10 +757,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             usdt_rate = await asyncio.to_thread(get_usdt_rate)
             amount_usdt = round(rub_discounted / usdt_rate, 2) if usdt_rate else context.user_data.get("amount_usdt", 0)
             context.user_data["amount_usdt"] = amount_usdt
-            # Обновляем сумму в ORDER_INFO_MAP со скидкой
+            # Обновляем сумму в ORDER_INFO_MAP, БД и Sheets со скидкой
             if order_number in ORDER_INFO_MAP:
                 ORDER_INFO_MAP[order_number]["rub"] = rub_discounted
                 ORDER_INFO_MAP[order_number]["usdt"] = amount_usdt
+            await asyncio.to_thread(update_order_amount_in_sheet, order_number, rub_discounted)
             await query.edit_message_text(
                 f"💎 VIP-оплата криптой (USDT)\n\n"
                 f"📦 Заказ: <b>{order_number}</b>\n"
@@ -1360,11 +1362,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data.startswith("resend_screenshot_"):
             order_number = query.data.replace("resend_screenshot_", "")
             user_id = query.from_user.id
-            attempts = context.user_data.get("screenshot_attempts", 0)
+            resend_counts = context.user_data.setdefault("screenshot_resends", {})
+            attempts = resend_counts.get(order_number, 0)
             if attempts >= 3:
                 await query.answer("Превышен лимит попыток (3). Обратитесь к оператору.", show_alert=True)
                 return
-            context.user_data["screenshot_attempts"] = attempts + 1
+            resend_counts[order_number] = attempts + 1
             AWAITING_SCREENSHOT[user_id] = order_number
             await query.edit_message_text(
                 f"📸 <b>Отправьте новый скриншот</b>\n\n"
@@ -1466,7 +1469,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         del AWAITING_SCREENSHOT[user_id]
-        context.user_data["screenshot_attempts"] = 0
 
     except Exception as e:
         logger.error(f"Ошибка в photo_handler: {e}")
@@ -1650,7 +1652,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 commission = get_kz_commission(amount)
                 commission_pct = round((commission - 1) * 100)
-                rub = int(amount * rate * commission)
+                rub = smart_round(int(amount * rate * commission))
                 order_number = await asyncio.to_thread(generate_order)
                 if not order_number:
                     await update.message.reply_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -1700,4 +1702,12 @@ async def periodic_cleanup(context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Ошибка при обработке запроса: {context.error}")
+    logger.error(f"Ошибка при обработке запроса: {context.error}", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"⚠️ <b>Ошибка бота</b>\n\n<code>{html_escape(str(context.error)[:500])}</code>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
