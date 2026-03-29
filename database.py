@@ -99,6 +99,13 @@ class Database:
                 conn.commit()
             except Exception:
                 pass  # Колонка уже существует
+
+            # Миграция: добавить sheets_row для кэша строки в Google Sheets
+            try:
+                c.execute("ALTER TABLE orders ADD COLUMN sheets_row INTEGER")
+                conn.commit()
+            except Exception:
+                pass  # Колонка уже существует
             
             conn.commit()
             logger.info("✅ База данных инициализирована")
@@ -231,6 +238,39 @@ class Database:
             if conn:
                 conn.close()
     
+    def set_order_sheets_row(self, order_number: str, sheets_row: int) -> None:
+        """Сохраняет номер строки в Google Sheets для быстрого обновления"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute(
+                "UPDATE orders SET sheets_row = ? WHERE order_number = ?",
+                (sheets_row, order_number)
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения sheets_row: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+    def get_order_sheets_row(self, order_number: str) -> Optional[int]:
+        """Возвращает кэшированный номер строки в Google Sheets или None"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute("SELECT sheets_row FROM orders WHERE order_number = ?", (order_number,))
+            result = c.fetchone()
+            return result[0] if result and result[0] else None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения sheets_row: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
     def update_order_status(self, order_number: str, new_status: str) -> bool:
         """Обновляет статус заказа"""
         conn = None

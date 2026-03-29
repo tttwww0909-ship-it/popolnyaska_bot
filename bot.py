@@ -164,6 +164,9 @@ def mark_order_created(user_id: int):
 _sheet_cache = {"sheet": None, "time": 0}
 _SHEET_CACHE_TTL = 300  # 5 минут
 
+_last_stats_update = 0
+_STATS_UPDATE_MIN_INTERVAL = 60  # не чаще раза в минуту
+
 def get_sheet():
     """Получает объект таблицы с кэшированием (5 мин)"""
     now = time.time()
@@ -192,7 +195,12 @@ def get_sheet():
 
 
 def _run_stats_update():
-    """Запускает обновление статистики в фоновом потоке"""
+    """Запускает обновление статистики в фоновом потоке (не чаще раза в минуту)"""
+    global _last_stats_update
+    now = time.time()
+    if now - _last_stats_update < _STATS_UPDATE_MIN_INTERVAL:
+        return
+    _last_stats_update = now
     threading.Thread(target=update_stats_sheet, daemon=True).start()
 
 MONTH_NAMES = {
@@ -481,21 +489,7 @@ def generate_order():
         try:
             max_number = 1000
 
-            # Проверяем Google Sheets
-            current_sheet = get_sheet()
-            if current_sheet:
-                try:
-                    records = current_sheet.get_all_records()
-                    if records:
-                        last = records[-1].get("Номер ордера", "ORD-1000")
-                        try:
-                            max_number = max(max_number, int(last.split("-")[1]))
-                        except (ValueError, IndexError):
-                            pass
-                except Exception as e:
-                    logger.warning(f"Ошибка чтения Sheets для генерации ордера: {e}")
-
-            # Проверяем локальную БД (на случай если в БД номер больше)
+            # Проверяем локальную БД — единственный источник правды
             try:
                 conn = sqlite3.connect("orders.db")
                 c = conn.cursor()
@@ -577,6 +571,10 @@ def add_order_to_sheet(order_data):
                     current_date,
                     ORDER_STATUSES["pending"]
                 ])
+                # Кэшируем номер строки чтобы не делать find() при обновлениях
+                added_cell = current_sheet.find(order_data["number"])
+                if added_cell:
+                    db.set_order_sheets_row(order_data["number"], added_cell.row)
                 logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка добавления в Google Sheets: {e}")
@@ -622,10 +620,16 @@ def update_payment_method(order_number, payment_method):
     try:
         current_sheet = get_sheet()
         if current_sheet:
-            cell = current_sheet.find(order_number)
-            if cell:
-                current_sheet.update_cell(cell.row, 7, payment_method)
-                logger.info(f"✅ Способ оплаты {payment_method} записан для {order_number}")
+            row = db.get_order_sheets_row(order_number)
+            if row:
+                current_sheet.update_cell(row, 7, payment_method)
+            else:
+                # Фоллбэк: ищем через find() если кэш пустой
+                cell = current_sheet.find(order_number)
+                if cell:
+                    current_sheet.update_cell(cell.row, 7, payment_method)
+                    db.set_order_sheets_row(order_number, cell.row)
+            logger.info(f"✅ Способ оплаты {payment_method} записан для {order_number}")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка записи способа оплаты: {e}")
 
@@ -643,10 +647,16 @@ def update_order_status(order_number, new_status):
         current_sheet = get_sheet()
         if current_sheet:
             try:
-                cell = current_sheet.find(order_number)
-                if cell:
-                    current_sheet.update_cell(cell.row, 9, new_status)
-                    logger.info(f"✅ Статус {order_number} обновлён в Google Sheets")
+                row = db.get_order_sheets_row(order_number)
+                if row:
+                    current_sheet.update_cell(row, 9, new_status)
+                else:
+                    # Фоллбэк: ищем через find() если кэш пустой
+                    cell = current_sheet.find(order_number)
+                    if cell:
+                        current_sheet.update_cell(cell.row, 9, new_status)
+                        db.set_order_sheets_row(order_number, cell.row)
+                logger.info(f"✅ Статус {order_number} обновлён в Google Sheets")
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка обновления Google Sheets: {e}")
         
