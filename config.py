@@ -200,5 +200,6 @@ FAQ_KEYBOARD = [
     [InlineKeyboardButton("🔹 Способы оплаты", callback_data="faq_payment")],
     [InlineKeyboardButton("🔹 Какая комиссия?", callback_data="faq_commission")],
     [InlineKeyboardButton("🔹 Что делать при проблемах?", callback_data="faq_problems")],
-    [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")]
+    [InlineKeyboardButton("🔹 Безопасно ли это?", callback_data="faq_safety")],
+    [InlineKeyboardButton("💡 Как выбрать номинал?", callback_data="faq_guide")]
 ]

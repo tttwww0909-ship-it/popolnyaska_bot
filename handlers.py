@@ -219,7 +219,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "faq_time":
             await query.edit_message_text(
                 "🔹 Сколько времени занимает?\n\n"
-                "🇰🇿 Пополнение Apple ID (Казахстан) — 15-30 минут после подтверждения оплаты.\n\n"
+                "🇰🇿 Пополнение Apple ID (Казахстан) — до 30 минут после подтверждения оплаты.\n\n"
                 "🎁 Gift Card (США, ОАЭ, Турция, СА) — до 15 минут. "
                 "Бот отправит вам код для пополнения Apple ID.\n\n"
                 "В редких случаях может занять больше времени из-за высокой нагрузки.",
@@ -278,6 +278,25 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "используем непосредственно для пополнения Apple ID напрямую и не сохраняем!\n\n"
                 "Ваши данные в безопасности!",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
+            )
+            return
+
+        if query.data == "faq_guide":
+            await query.edit_message_text(
+                "💡 Не знаете, сколько купить? Мы подскажем!\n\n"
+                "☁️ <b>Для базовых нужд (iCloud 50 ГБ):</b>\n"
+                "Турция 100–250 TL или Казахстан 5 000 KZT.\n"
+                "Хватит на несколько месяцев спокойного пользования.\n\n"
+                "👨‍👩‍👧‍👦 <b>Для семьи (Family Sharing):</b>\n"
+                "Казахстан от 10 000 KZT.\n"
+                "Одной оплаты хватит для всех участников семьи.\n\n"
+                "🎮 <b>Для геймеров:</b>\n"
+                "США от $25 или Турция от 500 TL.\n"
+                "Хватит на Battle Pass или крупный пак валюты.\n\n"
+                "💼 <b>Для профи (Final Cut, Logic Pro):</b>\n"
+                "США от $100 — доступ к профессиональному софту без ограничений.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]]),
+                parse_mode="HTML"
             )
             return
 
