@@ -185,6 +185,20 @@ def get_usdt_rate():
     return None
 
 
+def get_kz_commission(amount_kzt: int) -> float:
+    """Ступенчатая комиссия для KZ (ручное сопровождение).
+
+    5 000–9 999 KZT  → 20%
+    10 000–30 000 KZT → 15%
+    > 30 000 KZT      → 12%
+    """
+    if amount_kzt < 10000:
+        return 1.20
+    if amount_kzt <= 30000:
+        return 1.15
+    return 1.12
+
+
 def generate_order():
     """Генерация номера ордера. Lock защищает от race condition."""
     with _ORDER_COUNTER_LOCK:

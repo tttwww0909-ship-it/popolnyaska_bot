@@ -16,7 +16,7 @@ from config import (
     BYBIT_UID, BSC_ADDRESS, TRC20_ADDRESS,
 )
 from utils import (
-    fmt, get_rate, get_usdt_rate, check_spam, mark_order_created, generate_order,
+    fmt, get_rate, get_usdt_rate, get_kz_commission, check_spam, mark_order_created, generate_order,
     cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
@@ -415,7 +415,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Ошибка получения курса. Попробуйте позже.")
                 return
 
-            rub = int(amount * rate * 1.15)
+            commission = get_kz_commission(amount)
+            commission_pct = round((commission - 1) * 100)
+            rub = int(amount * rate * commission)
             order_number = await asyncio.to_thread(generate_order)
             if not order_number:
                 await query.edit_message_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -439,7 +441,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
                 f"Тариф: <b>{tariff_name}</b>\n"
-                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия 15%)",
+                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (сервисный сбор {commission_pct}%)",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )
@@ -1448,7 +1450,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text("❌ Ошибка получения курса. Попробуйте позже.")
                     return
 
-                rub = int(amount * rate * 1.15)
+                commission = get_kz_commission(amount)
+                commission_pct = round((commission - 1) * 100)
+                rub = int(amount * rate * commission)
                 order_number = await asyncio.to_thread(generate_order)
                 if not order_number:
                     await update.message.reply_text("❌ Ошибка генерации заказа. Попробуйте позже.")
@@ -1474,7 +1478,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📦 Информация о заказе\n\n"
                     f"Номер заказа: <b>{order_number}</b>\n"
                     f"Тариф: <b>{tariff_name}</b>\n"
-                    f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия 15%)",
+                    f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (сервисный сбор {commission_pct}%)",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
