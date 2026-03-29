@@ -292,7 +292,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "apple_topup":
             keyboard = [
                 [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
                 [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
                 [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
                 [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
@@ -1426,7 +1426,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "🍏 Пополнить Apple ID":
             keyboard = [
                 [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
                 [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
                 [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
                 [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
