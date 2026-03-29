@@ -7,7 +7,7 @@
 - **Systemd сервис:** `popolnyaska-bot.service`
 - **База данных:** SQLite (orders.db, timeout=5с) — основной источник данных; Google Sheets — запись + лист Статистика
 - **Бэкап SQLite:** cron ежедневно в 03:00, хранит 7 последних (backup.sh)
-- **Деплой:** `ssh <SERVER_IP> "cd /opt/popolnyaska-bot && git pull && systemctl restart popolnyaska-bot"`
+- **Деплой:** `ssh <SERVER_IP> "cd /opt/popolnyaska-bot && git pull && systemctl restart popolnyaska-bot && sleep 3 && systemctl is-active popolnyaska-bot"`
 - **CI/CD:** GitHub Actions — pytest на push/PR в main
 - **GitHub:** https://github.com/tttwww0909-ship-it/popolnyaska_bot
 
@@ -15,18 +15,19 @@
 
 ```
 popolnyaska_bot/
-├── bot.py              (26 строк)   — точка входа, запуск polling
-├── config.py           (130 строк)  — .env, константы, логирование, тарифы
-├── utils.py            (161 строка) — TimedDict, валидация email, антиспам, курсы, генерация ордера
-├── handlers.py         (1353 строки) — все Telegram-хендлеры (команды, кнопки, админка, отзывы)
-├── sheets.py           (288 строк)  — Google Sheets: запись заказов, обновление статистики (lazy init)
-├── database.py         (405 строк)  — SQLite CRUD, миграции
+├── bot.py              (35 строк)    — точка входа, запуск polling
+├── config.py           (205 строк)   — .env, константы, логирование, тарифы, описания регионов, FAQ
+├── utils.py            (266 строк)   — TimedDict, валидация email, антиспам, курсы (с кэшированием), комиссии, генерация ордера
+├── handlers.py         (1714 строк)  — все Telegram-хендлеры (команды, кнопки, VIP-промо, админка, отзывы)
+├── sheets.py           (352 строки)  — Google Sheets: запись заказов, обновление статистики (lazy init)
+├── database.py         (458 строк)   — SQLite CRUD, миграции
 ├── requirements.txt    — python-telegram-bot[job-queue]==20.3, gspread==6.2.1, oauth2client, requests, python-dotenv, pytest
 ├── .env                — токен, ADMIN_ID, реквизиты оплаты
 ├── service_account.json — ключ Google Sheets
 ├── backup.sh           — скрипт бэкапа SQLite
 ├── .github/workflows/ci.yml — GitHub Actions CI
 ├── tests/
+│   ├── conftest.py     — фикстуры pytest
 │   ├── test_utils.py   — тесты TimedDict, fmt, validate_email, check_spam, generate_order
 │   └── test_database.py — тесты Database CRUD
 ├── .gitignore
@@ -69,13 +70,16 @@ popolnyaska_bot/
 - [x] Казахстан: тарифы 5 000 / 10 000 / 15 000 KZT + кастомная сумма 2 000–45 000 KZT (пополнение по почте Apple ID)
 - [x] Gift Card регионы (US, AE, TR, SA): тарифы в валюте региона, выдача кода через бот
 - [x] Расчёт RUB: стоимость в USDT × курс USDT × комиссия региона
-- [x] Комиссия по регионам: KZ 15%, US 15%, AE 15%, SA 15%, TR 10%
-- [x] Заказы >8 500 ₽ — только крипто-оплата
+- [x] Ступенчатая комиссия KZ: 5–9 999 KZT → 20%, 10 000–30 000 KZT → 15%, > 30 000 KZT → 12%
+- [x] Ступенчатая комиссия US: 5–50 USD → 15%, 100–300 USD → 12%, 500+ USD → 11%
+- [x] Комиссия TR: 12%, AE: 15%, SA: 15%
+- [x] VIP-промо экран для заказов > 8 500 ₽ — только крипто-оплата со скидкой 2%
 - [x] Генерация ордера (ORD-XXXX) с Lock от race condition
 - [x] Сохранение заказа в Google Sheets + SQLite
 - [x] Антиспам (60 сек кулдаун, макс 3 заказа за 20 мин)
-- [x] Кнопка "📎 Отправить другой скриншот" для замены скриншота
+- [x] Кнопка "📎 Отправить другой скриншот" для замены скриншота (лимит 3 попытки)
 - [x] Валидация email (regex) при вводе почты Apple ID
+- [x] ⚠️ Предупреждение о НДС 12% для КЗ App Store
 
 ### ✅ Способы оплаты (порядок: ЮMoney → OZON → Крипто)
 - [x] ЮMoney (перевод на кошелёк)
@@ -105,6 +109,8 @@ popolnyaska_bot/
 - [x] Сколько времени занимает (KZ 15-30 мин, Gift Card до 15 мин)
 - [x] Способы оплаты
 - [x] Какая комиссия (по регионам)
+- [x] Как выбрать номинал (гайд)
+- [x] Как оплатить через Telegram Wallet (USDT гайд)
 - [x] Что делать при проблемах
 - [x] Безопасно ли это
 
@@ -118,6 +124,7 @@ popolnyaska_bot/
 - [x] Модульная архитектура (bot.py → config / utils / handlers / sheets / database)
 - [x] Кэширование Google Sheets (get_sheet() с TTL 5 мин)
 - [x] Кэширование sheets_row в SQLite (без find() при обновлениях)
+- [x] Кэширование курсов валют (TTL, fallback на последнее значение)
 - [x] Debounce обновления статистики (не чаще раза в минуту)
 - [x] Обновление статистики в фоновом потоке (threading)
 - [x] gspread retry с экспоненциальным backoff (3 попытки)
@@ -132,6 +139,15 @@ popolnyaska_bot/
 - [x] Тесты (pytest): utils, database
 - [x] CI/CD: GitHub Actions на push/PR
 
+### ✅ Безопасность и надёжность
+- [x] Обработка ошибок API (ExchangeRate, Coinbase) с fallback
+- [x] Валидация пользовательского ввода (суммы, email, callback data)
+- [x] XSS-экранирование в отзывах (html.escape)
+- [x] Лимит пересылки скриншотов — 3 попытки на заказ
+- [x] VIP-скидка синхронизирована в БД и Google Sheets
+- [x] Глобальный error_handler для всех необработанных исключений
+- [x] smart_round корректно работает для KZ (степень 100)
+
 ### ✅ Проведённые аудиты
 - [x] Аудит v1: Удаление мёртвого кода (bybit, reviews channel, payment handlers, aiohttp)
 - [x] Аудит v2: Исправление багов (.gitignore, AWAITING_SCREENSHOT, ORDER_LOCK, race condition)
@@ -140,9 +156,11 @@ popolnyaska_bot/
 - [x] Финальный аудит: миграция админки на SQLite, удаление PAYMENT_MAP/json/BYBIT_API_*
 - [x] Модульный рефакторинг: разбивка монолита на 6 модулей
 - [x] Хардкод-аудит: .gitignore, email-валидация, type hints, README
+- [x] Комплексный аудит v4: error handling API, кэш курсов, input validation, XSS, screenshot limit, VIP discount sync, error_handler
 
 ## Возможные улучшения (не реализовано)
 - [ ] Разбить handlers.py на подмодули (admin, order, payment, review)
+- [ ] Удалить временные файлы (fix_vip.py, handlers_recovered.py, patch_fix.py)
 - [ ] Добавить больше сервисов (не только Apple ID)
 - [ ] Реферальная система
 - [ ] Автоматическая проверка оплаты
