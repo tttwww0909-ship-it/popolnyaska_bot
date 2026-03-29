@@ -244,12 +244,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "faq_commission":
             await query.edit_message_text(
                 "🔹 Какая комиссия сервиса?\n\n"
-                "Комиссия зависит от региона:\n\n"
-                "🇰🇿 Казахстан — 15%\n"
-                "🇺🇸 США — 15%\n"
-                "🇦🇪 ОАЭ — 15%\n"
-                "🇸🇦 Саудовская Аравия — 15%\n"
-                "🇹🇷 Турция — 10%",
+                "Комиссия зависит от региона и суммы:\n\n"
+                "🇺🇸 США — 15% (до $50) / 12% ($100–$300) / 11% ($500)\n"
+                "Турция — 12%\n"
+                "🇰🇿 Казахстан — 20% (до 10к) / 15% (10к–30к) / 12% (свыше 30к)\n"
+                "🇦🇪 ОАЭ Premium — 15%\n"
+                "🇸🇦 Саудовская Аравия Premium — 15%",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
             )
             return
@@ -292,7 +292,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "apple_topup":
             keyboard = [
                 [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("�🇷 Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("Турция", callback_data="region_TR")],
                 [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
                 [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
                 [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
@@ -398,7 +398,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             _hints_r = GIFT_CARD_HINTS.get(region_code, {})
             hint = _hints_r.get(t_amount) or _hints_r.get("_default")
-            hint_line = f"\n💡 <i>Этого номинала хватит на: {hint}.</i>" if hint else ""
+            hint_line = f"\n\n💡 <i>Этого номинала хватит на: {hint}.</i>" if hint else ""
             await query.edit_message_text(
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
@@ -453,7 +453,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("❌ Отмена", callback_data="apple_topup")]
             ]
             kz_hint = GIFT_CARD_HINTS.get("KZ", {}).get(amount)
-            hint_line = f"\n💡 <i>Этого номинала хватит на: {kz_hint}.</i>" if kz_hint else ""
+            hint_line = f"\n\n💡 <i>Этого номинала хватит на: {kz_hint}.</i>" if kz_hint else ""
             await query.edit_message_text(
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
@@ -1426,7 +1426,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "🍏 Пополнить Apple ID":
             keyboard = [
                 [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("�🇷 Турция", callback_data="region_TR")],
+                [InlineKeyboardButton("Турция", callback_data="region_TR")],
                 [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
                 [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
                 [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
