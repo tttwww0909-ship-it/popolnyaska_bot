@@ -2184,11 +2184,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Получаем информацию о заказе
         order_info = ORDER_INFO_MAP.get(order_number, {})
-        sum_line = f"{fmt(order_info.get('rub', 0))} ₽"
-        if order_info.get('payment_method') == 'Crypto':
-            amount_usdt = order_info.get('usdt')
-            if amount_usdt:
-                sum_line += f" ({amount_usdt} USDT)"
+        is_crypto = order_info.get('payment_method') == 'Crypto'
+        if is_crypto:
+            amount_usdt = order_info.get('usdt', '?')
+            sum_line = f"{amount_usdt} USDT"
+            payment_line = "💎 Bybit / Telegram кошелёк"
+        else:
+            sum_line = f"{fmt(order_info.get('rub', 0))} ₽"
+            payment_line = order_info.get('payment_method', '—')
         
         # Пересылаем фото админу с информацией о заказе
         try:
@@ -2200,7 +2203,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"<b>📦 Заказ:</b> {order_number}\n"
                     f"<b>Регион:</b> {REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', 'N/A'))}\n"
                     f"<b>Тариф:</b> {order_info.get('tariff', 'N/A')}\n"
-                    f"<b>Сумма:</b> {sum_line}\n\n"
+                    f"<b>Сумма:</b> {sum_line}\n"
+                    f"<b>Оплата:</b> {payment_line}\n\n"
                     f"<b>👤 Клиент:</b>\n"
                     f"Имя: {update.message.from_user.first_name or 'Неизвестно'}\n"
                     f"Ник: @{update.message.from_user.username if update.message.from_user.username else 'нет'}\n"
