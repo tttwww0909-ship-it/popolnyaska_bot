@@ -536,7 +536,7 @@ async def send_review_for_moderation(bot, review_id: int, user_id: int, username
                                       order_num: str, rating: int, comment: str | None):
     """Отправляет отзыв админу для информации"""
     stars = "⭐" * rating
-    comment_text = f"\n💬 Комментарий: <i>{comment}</i>" if comment else "\n💬 Комментарий: —"
+    comment_text = f"\n💬 Комментарий: <i>{comment}</i>" if comment else ""
     try:
         await bot.send_message(
             ADMIN_ID,
