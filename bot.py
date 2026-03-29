@@ -27,6 +27,7 @@ OZON_PAY_URL = os.getenv("OZON_PAY_URL", "")
 BYBIT_UID = os.getenv("BYBIT_UID", "")
 BSC_ADDRESS = os.getenv("BSC_ADDRESS", "")
 TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
+REVIEWS_CHANNEL = os.getenv("REVIEWS_CHANNEL", "@popolnyaskareviews")
 
 # Проверяем, что все переменные загружены
 if not TOKEN:
@@ -531,6 +532,32 @@ def bybit_signature(timestamp, api_key, secret, recv_window, body_str):
     return hmac.new(secret.encode(), param_str.encode(), hashlib.sha256).hexdigest()
 
 
+async def send_review_for_moderation(bot, review_id: int, user_id: int, username: str,
+                                      order_num: str, rating: int, comment: str | None):
+    """Отправляет отзыв админу на модерацию с кнопками Одобрить/Отклонить"""
+    stars = "⭐" * rating
+    comment_text = f"\n💬 Комментарий: <i>{comment}</i>" if comment else "\n💬 Комментарий: —"
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"⭐ <b>Новый отзыв на модерацию</b>\n\n"
+            f"📦 Заказ: <b>{order_num}</b>\n"
+            f"👤 Клиент: @{username} (ID: <code>{user_id}</code>)\n"
+            f"Оценка: {stars}"
+            f"{comment_text}\n\n"
+            f"<i>Опубликовать в канале @popolnyaskareviews?</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Опубликовать", callback_data=f"review_approve_{review_id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"review_reject_{review_id}")
+                ]
+            ])
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки отзыва на модерацию: {e}")
+
+
 def create_bybit_payment(order_number, amount_usdt, service_name, tariff_name):
     """Создаёт счёт через Bybit Pay API"""
     try:
@@ -838,7 +865,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🍏 Пополнить Apple ID", callback_data="apple_topup")],
                 [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
                 [InlineKeyboardButton("❓ FAQ", callback_data="faq_menu")],
-                [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")]
+                [InlineKeyboardButton("⭐ Отзывы", url="https://t.me/popolnyaskareviews")]
             ]
             await query.edit_message_text(
                 "🍏 Главное меню\n\n"
@@ -847,30 +874,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # === ОТЗЫВЫ ===
+        # === ОТЗЫВЫ (редирект на канал) ===
         if query.data == "reviews":
-            recent_reviews = db.get_recent_reviews(limit=5)
-            if recent_reviews:
-                reviews_text = ""
-                for r in recent_reviews:
-                    stars = "⭐" * r["rating"]
-                    comment_line = f"\n<i>\"{r['comment']}\"</i>\n" if r.get("comment") else "\n"
-                    reviews_text += f"{stars}{comment_line}— {r['username']}\n\n"
-            else:
-                reviews_text = "<i>Отзывов пока нет. Будьте первым!</i>\n\n"
-            keyboard = [
-                [InlineKeyboardButton("📢 Наш канал", url="https://t.me/popolnyaskachannel")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
-            ]
-            await query.edit_message_text(
-                "⭐ <b>Отзывы наших клиентов</b>\n\n"
-                "━━━━━━━━━━━━━━━━━━\n\n"
-                f"{reviews_text}"
-                "━━━━━━━━━━━━━━━━━━\n\n"
-                "💬 Отзыв можно оставить после завершения заказа",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
+            await query.answer("Открываю канал с отзывами...", show_alert=False)
             return
 
         # === FAQ МЕНЮ ===
@@ -2073,20 +2079,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username = query.from_user.username or query.from_user.full_name or "Аноним"
             if user_id in AWAITING_REVIEW_COMMENT:
                 del AWAITING_REVIEW_COMMENT[user_id]
-            db.add_review(user_id, username, order_num, rating, None)
+            review_id = db.add_review(user_id, username, order_num, rating, None)
             stars = "⭐" * rating
-            try:
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"⭐ <b>Новый отзыв!</b>\n\n"
-                    f"📦 Заказ: <b>{order_num}</b>\n"
-                    f"👤 Клиент: @{username} (ID: <code>{user_id}</code>)\n"
-                    f"Оценка: {stars}\n"
-                    f"Комментарий: —",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа об отзыве: {e}")
+            await send_review_for_moderation(context.bot, review_id, user_id, username, order_num, rating, None)
             await query.edit_message_text(
                 f"✅ Спасибо за отзыв! {stars}\n\nВаше мнение помогает нам становиться лучше.",
                 parse_mode="HTML"
@@ -2099,6 +2094,49 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del AWAITING_REVIEW_COMMENT[user_id]
             await query.edit_message_text(
                 "✅ Заказ выполнен! Спасибо за покупку.\n\nЕсли возникнут вопросы — мы всегда на связи.",
+                parse_mode="HTML"
+            )
+
+        # === МОДЕРАЦИЯ ОТЗЫВОВ (только для админа) ===
+        elif query.data.startswith("review_approve_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("Нет доступа", show_alert=True)
+                return
+            review_id = int(query.data.replace("review_approve_", ""))
+            review = db.get_review_by_id(review_id)
+            if not review:
+                await query.edit_message_text("❌ Отзыв не найден в базе.")
+                return
+            db.update_review_status(review_id, "approved")
+            stars = "⭐" * review["rating"]
+            username = review.get("username", "Аноним")
+            comment = review.get("comment")
+            comment_text = f"\n\n<i>«{comment}»</i>" if comment else ""
+            # Публикуем в канал
+            try:
+                await context.bot.send_message(
+                    REVIEWS_CHANNEL,
+                    f"{stars}\n"
+                    f"<b>@{username}</b> — заказ {review['order_number']}"
+                    f"{comment_text}",
+                    parse_mode="HTML"
+                )
+                await query.edit_message_text(
+                    f"✅ Отзыв #{review_id} опубликован в канале.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка публикации отзыва в канал: {e}")
+                await query.edit_message_text(f"❌ Ошибка публикации: {e}")
+
+        elif query.data.startswith("review_reject_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("Нет доступа", show_alert=True)
+                return
+            review_id = int(query.data.replace("review_reject_", ""))
+            db.update_review_status(review_id, "rejected")
+            await query.edit_message_text(
+                f"❌ Отзыв #{review_id} отклонён.",
                 parse_mode="HTML"
             )
 
@@ -2337,20 +2375,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comment = text
             username = update.message.from_user.username or update.message.from_user.full_name or "Аноним"
             del AWAITING_REVIEW_COMMENT[user_id]
-            db.add_review(user_id, username, order_num, rating, comment)
+            review_id = db.add_review(user_id, username, order_num, rating, comment)
             stars = "⭐" * rating
-            try:
-                await context.bot.send_message(
-                    ADMIN_ID,
-                    f"⭐ <b>Новый отзыв!</b>\n\n"
-                    f"📦 Заказ: <b>{order_num}</b>\n"
-                    f"👤 Клиент: @{username} (ID: <code>{user_id}</code>)\n"
-                    f"Оценка: {stars}\n"
-                    f"Комментарий: {comment}",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа об отзыве: {e}")
+            await send_review_for_moderation(context.bot, review_id, user_id, username, order_num, rating, comment)
             await update.message.reply_text(
                 f"✅ Спасибо за отзыв! {stars}\n\nВаше мнение помогает нам становиться лучше.",
                 parse_mode="HTML"

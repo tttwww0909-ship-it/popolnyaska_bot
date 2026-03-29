@@ -89,9 +89,16 @@ class Database:
                     order_number TEXT,
                     rating INTEGER NOT NULL,
                     comment TEXT,
+                    status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            # Миграция: добавить колонку status если её нет (для существующих БД)
+            try:
+                c.execute("ALTER TABLE reviews ADD COLUMN status TEXT DEFAULT 'pending'")
+                conn.commit()
+            except Exception:
+                pass  # Колонка уже существует
             
             conn.commit()
             logger.info("✅ База данных инициализирована")
@@ -347,35 +354,69 @@ class Database:
             if conn:
                 conn.close()
     
-    def add_review(self, user_id: int, username: str, order_number: str, rating: int, comment: str = None) -> bool:
-        """Добавляет отзыв клиента"""
+    def add_review(self, user_id: int, username: str, order_number: str, rating: int, comment: str = None) -> int:
+        """Добавляет отзыв клиента со статусом pending. Возвращает ID отзыва или 0 при ошибке."""
         conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
             c.execute('''
-                INSERT INTO reviews (user_id, username, order_number, rating, comment)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO reviews (user_id, username, order_number, rating, comment, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
             ''', (user_id, username, order_number, rating, comment))
             conn.commit()
-            logger.info(f"✅ Отзыв от {user_id} сохранён (рейтинг {rating})")
-            return True
+            review_id = c.lastrowid
+            logger.info(f"✅ Отзыв от {user_id} сохранён (рейтинг {rating}, id {review_id})")
+            return review_id
         except Exception as e:
             logger.error(f"❌ Ошибка добавления отзыва: {e}")
+            return 0
+        finally:
+            if conn:
+                conn.close()
+
+    def update_review_status(self, review_id: int, status: str) -> bool:
+        """Обновляет статус отзыва: pending / approved / rejected"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute("UPDATE reviews SET status = ? WHERE id = ?", (status, review_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления статуса отзыва: {e}")
             return False
         finally:
             if conn:
                 conn.close()
 
+    def get_review_by_id(self, review_id: int) -> dict:
+        """Возвращает отзыв по ID"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM reviews WHERE id = ?", (review_id,))
+            row = c.fetchone()
+            return dict(row) if row else {}
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения отзыва по ID: {e}")
+            return {}
+        finally:
+            if conn:
+                conn.close()
+
     def get_recent_reviews(self, limit: int = 5) -> List[Dict]:
-        """Возвращает последние отзывы"""
+        """Возвращает последние одобренные отзывы"""
         conn = None
         try:
             conn = sqlite3.connect(self.db_file)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
             c.execute('''
-                SELECT * FROM reviews ORDER BY created_at DESC LIMIT ?
+                SELECT * FROM reviews WHERE status = 'approved' ORDER BY created_at DESC LIMIT ?
             ''', (limit,))
             results = c.fetchall()
             return [dict(row) for row in results]
