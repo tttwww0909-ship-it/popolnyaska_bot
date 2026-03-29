@@ -16,7 +16,7 @@ from config import (
     BYBIT_UID, BSC_ADDRESS, TRC20_ADDRESS,
 )
 from utils import (
-    fmt, get_rate, get_usdt_rate, get_kz_commission, check_spam, mark_order_created, generate_order,
+    fmt, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, check_spam, mark_order_created, generate_order,
     cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
@@ -366,7 +366,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not usdt_rate:
                 await query.edit_message_text("⚠️ Курс валют временно недоступен. Попробуйте через несколько минут.")
                 return
-            commission = REGION_COMMISSION.get(region_code, 1.15)
+            commission = get_us_commission(t_amount) if region_code == "US" else REGION_COMMISSION.get(region_code, 1.15)
             commission_pct = round((commission - 1) * 100)
             rub = int(t_usdt * usdt_rate * commission)
             order_number = await asyncio.to_thread(generate_order)

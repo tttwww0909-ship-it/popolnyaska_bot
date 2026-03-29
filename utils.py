@@ -185,6 +185,20 @@ def get_usdt_rate():
     return None
 
 
+def get_us_commission(amount_usd: int) -> float:
+    """Ступенчатая комиссия для US Gift Cards.
+
+    5–50 USD   → 15%
+    100–300 USD → 12%
+    500+ USD    → 11%
+    """
+    if amount_usd <= 50:
+        return 1.15
+    if amount_usd <= 300:
+        return 1.12
+    return 1.11
+
+
 def get_kz_commission(amount_kzt: int) -> float:
     """Ступенчатая комиссия для KZ (ручное сопровождение).
 
