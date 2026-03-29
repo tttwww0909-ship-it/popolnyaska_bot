@@ -787,8 +787,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "  — Телеграм кошелёк (USDT TRC20)\n\n"
                 "⚠️ Для заказов свыше 8 500 ₽ доступна только оплата криптой.\n\n"
                 "⏱ <b>Сроки:</b>\n"
-                "🇰🇿 Казахстан — 15-30 минут | 🎁 Gift Card — до 15 минут\n\n"
-                "💰 <b>Комиссия:</b> 15% (🇹🇷 Турция — 10%)\n\n"
+                "🇰🇿 Казахстан — до 30 минут | 🎁 Gift Card — до 15 минут\n\n"
                 "❓ <b>Проблемы с оплатой?</b>\n"
                 "Свяжитесь с поддержкой через кнопку ниже.",
                 reply_markup=InlineKeyboardMarkup(keyboard),
