@@ -543,10 +543,28 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["current_order_number"] = order_number
 
                 if order["rub"] > 8500:
-                    pay_buttons = [
-                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
-                    ]
+                    # Промо-экран для крупных заказов (Вариант Б)
+                    rub_discounted = round(order["rub"] * 0.98)
+                    saving = order["rub"] - rub_discounted
+                    usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
+                    await query.edit_message_text(
+                        f"💎 <b>Крупный заказ — особые условия!</b>\n\n"
+                        f"Сумма вашего заказа превышает 8 500 ₽. Для обеспечения максимальной "
+                        f"безопасности и скорости обработки крупные платежи принимаются в USDT.\n\n"
+                        f"<b>Ваши преимущества:</b>\n"
+                        f"✅ Скидка 2% — вы экономите <b>{fmt(saving)} ₽</b>\n"
+                        f"✅ Итоговая сумма: <b>{fmt(rub_discounted)} ₽</b>{usdt_suffix}\n"
+                        f"✅ Приоритетная выдача кода\n"
+                        f"✅ Отсутствие рисков блокировки банком\n\n"
+                        f"<i>Нет криптокошелька? Оператор поможет за 2 минуты.</i>",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(f"💎 Оплатить криптой (−2%)", callback_data=f"vip_crypto_{order_number}")],
+                            [InlineKeyboardButton("💬 Связаться с оператором", url="https://t.me/popolnyaska_halper")],
+                        ]),
+                        parse_mode="HTML"
+                    )
+                    context.user_data["rub_discounted"] = rub_discounted
+                    logger.info(f"Заказ {order_number} — промо VIP-экран (>{8500}₽)")
                 else:
                     pay_buttons = [
                         [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
@@ -554,18 +572,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
                         [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
                     ]
-
-                usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
-                await query.edit_message_text(
-                    f"✅ Заявка сформирована!\n\n"
-                    f"Номер заказа: <b>{order['number']}</b>\n"
-                    f"Тариф: <b>{order['tariff']}</b>\n"
-                    f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n\n"
-                    f"Выберите способ оплаты:",
-                    reply_markup=InlineKeyboardMarkup(pay_buttons),
-                    parse_mode="HTML"
-                )
-                logger.info(f"Заказ {order_number} — выбор способа оплаты")
+                    usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
+                    await query.edit_message_text(
+                        f"✅ Заявка сформирована!\n\n"
+                        f"Номер заказа: <b>{order['number']}</b>\n"
+                        f"Тариф: <b>{order['tariff']}</b>\n"
+                        f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n\n"
+                        f"Выберите способ оплаты:",
+                        reply_markup=InlineKeyboardMarkup(pay_buttons),
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Заказ {order_number} — выбор способа оплаты")
             finally:
                 ORDER_LOCK.pop(order_number, None)
 
@@ -635,6 +652,48 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Клиент {query.from_user.id} выбрал OZON банк для {order_number}")
 
         # === ОПЛАТА КРИПТОЙ ===
+        elif query.data.startswith("vip_crypto_"):
+            order_number = query.data.replace("vip_crypto_", "")
+            order = context.user_data.get("order")
+            if not order:
+                await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
+                return
+            # Применяем скидку 2% к сумме заказа
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            usdt_rate = await asyncio.to_thread(get_usdt_rate)
+            amount_usdt = round(rub_discounted / usdt_rate, 2) if usdt_rate else context.user_data.get("amount_usdt", 0)
+            context.user_data["amount_usdt"] = amount_usdt
+            # Обновляем сумму в ORDER_INFO_MAP со скидкой
+            if order_number in ORDER_INFO_MAP:
+                ORDER_INFO_MAP[order_number]["rub"] = rub_discounted
+                ORDER_INFO_MAP[order_number]["usdt"] = amount_usdt
+            await query.edit_message_text(
+                f"💎 VIP-оплата криптой (USDT)\n\n"
+                f"📦 Заказ: <b>{order_number}</b>\n"
+                f"💰 К оплате: <b>{amount_usdt} USDT</b> ({fmt(rub_discounted)} ₽)\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📲 <b>Способ 1: Bybit (перевод по UID)</b>\n"
+                f"UID: <code>{BYBIT_UID}</code>\n"
+                f"Сумма: <b>{amount_usdt} USDT</b>\n\n"
+                f"📲 <b>Способ 2: Bybit (адрес)</b>\n"
+                f"Адрес: <code>{BSC_ADDRESS}</code>\n"
+                f"Сеть: <b>BSC (BEP20)</b> | Монета: <b>USDT</b>\n\n"
+                f"📲 <b>Способ 3: Телеграм кошелёк</b>\n"
+                f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
+                f"Сеть: <b>Tron (TRC20)</b> | Монета: <b>USDT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"После перевода нажмите «✅ Я оплатил» и отправьте скриншот подтверждения.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data=f"confirm_{order_number}")]
+                ]),
+                parse_mode="HTML"
+            )
+            await asyncio.to_thread(update_payment_method, order_number, "Crypto (VIP)")
+            if order_number in ORDER_INFO_MAP:
+                ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto (VIP)'
+            logger.info(f"Клиент {query.from_user.id} выбрал VIP крипто-оплату для {order_number}")
+
         elif query.data.startswith("pay_crypto_"):
             order_number = query.data.replace("pay_crypto_", "")
             order = context.user_data.get("order")
