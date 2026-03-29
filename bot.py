@@ -859,7 +859,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 reviews_text = "<i>Отзывов пока нет. Будьте первым!</i>\n\n"
             keyboard = [
-                [InlineKeyboardButton("📢 Наш канал", url="https://t.me/popolnyaskaservice")],
+                [InlineKeyboardButton("📢 Наш канал", url="https://t.me/popolnyaskachannel")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_start")]
             ]
             await query.edit_message_text(
@@ -951,7 +951,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📧 Для жалоб, предложений, сотрудничества и запросов в службу поддержки:\n"
                 "<code>popolnyaskaservice@icloud.com</code>",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/poplnyaska_halper")],
+                    [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/popolnyaska_halper")],
                     [InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]
                 ]),
                 parse_mode="HTML"
@@ -1201,6 +1201,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mark_order_created(user_id)
 
                 # === СОХРАНЯЕМ ИНФОРМАЦИЮ О ЗАКАЗЕ ===
+                usdt_rate = get_usdt_rate()
+                amount_usdt = round(order["rub"] / usdt_rate, 2)
+                context.user_data["amount_usdt"] = amount_usdt
+
                 ORDER_INFO_MAP[order_number] = {
                     "user_id": user_id,
                     "username": order["user"].username or "Нет ника",
@@ -1209,6 +1213,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "tariff": order["tariff"],
                     "kzt": order["kzt"],
                     "rub": order["rub"],
+                    "usdt": amount_usdt,
                     "region": order.get("region", "KZ")
                 }
 
@@ -1225,10 +1230,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["current_order_number"] = order_number
 
                 # === ВЫБОР СПОСОБА ОПЛАТЫ ===
-                usdt_rate = get_usdt_rate()
-                amount_usdt = round(order["rub"] / usdt_rate, 2)
-                context.user_data["amount_usdt"] = amount_usdt
-
                 if order["rub"] > 8500:
                     pay_buttons = [
                         [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
@@ -1449,7 +1450,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ПОМОЩЬ ===
         elif query.data == "help_payment":
             keyboard = [
-                [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/poplnyaska_halper")],
+                [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/popolnyaska_halper")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_payment")]
             ]
             await query.edit_message_text(
@@ -1923,11 +1924,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             # Предлагаем оценить заказ
                             rating_keyboard = [
                                 [
-                                    InlineKeyboardButton("⭐", callback_data=f"review_rate_1_{order_num}"),
-                                    InlineKeyboardButton("⭐⭐", callback_data=f"review_rate_2_{order_num}"),
-                                    InlineKeyboardButton("⭐⭐⭐", callback_data=f"review_rate_3_{order_num}"),
-                                    InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"review_rate_4_{order_num}"),
-                                    InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"review_rate_5_{order_num}"),
+                                    InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{order_num}"),
+                                    InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{order_num}"),
+                                    InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{order_num}"),
+                                    InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{order_num}"),
+                                    InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{order_num}"),
                                 ],
                                 [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{order_num}")]
                             ]
@@ -2009,11 +2010,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     rating_keyboard = [
                         [
-                            InlineKeyboardButton("⭐", callback_data=f"review_rate_1_{order_num}"),
-                            InlineKeyboardButton("⭐⭐", callback_data=f"review_rate_2_{order_num}"),
-                            InlineKeyboardButton("⭐⭐⭐", callback_data=f"review_rate_3_{order_num}"),
-                            InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"review_rate_4_{order_num}"),
-                            InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"review_rate_5_{order_num}"),
+                            InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{order_num}"),
+                            InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{order_num}"),
+                            InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{order_num}"),
+                            InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{order_num}"),
+                            InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{order_num}"),
                         ],
                         [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{order_num}")]
                     ]
@@ -2138,6 +2139,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Получаем информацию о заказе
         order_info = ORDER_INFO_MAP.get(order_number, {})
+        amount_usdt = order_info.get('usdt')
+        sum_line = f"{fmt(order_info.get('rub', 0))} ₽"
+        if amount_usdt:
+            sum_line += f" ({amount_usdt} USDT)"
         
         # Пересылаем фото админу с информацией о заказе
         try:
@@ -2149,7 +2154,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"<b>📦 Заказ:</b> {order_number}\n"
                     f"<b>Регион:</b> {REGION_DISPLAY.get(order_info.get('region', ''), order_info.get('region', 'N/A'))}\n"
                     f"<b>Тариф:</b> {order_info.get('tariff', 'N/A')}\n"
-                    f"<b>Сумма:</b> {fmt(order_info.get('rub', 0))} ₽\n\n"
+                    f"<b>Сумма:</b> {sum_line}\n\n"
                     f"<b>👤 Клиент:</b>\n"
                     f"Имя: {update.message.from_user.first_name or 'Неизвестно'}\n"
                     f"Ник: @{update.message.from_user.username if update.message.from_user.username else 'нет'}\n"
@@ -2212,6 +2217,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML"
                 )
                 logger.info(f"Код отправлен клиенту {code_client} для заказа {code_order}")
+                # Предлагаем оставить отзыв
+                try:
+                    rating_keyboard = [
+                        [
+                            InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{code_order}"),
+                            InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{code_order}"),
+                            InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{code_order}"),
+                            InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{code_order}"),
+                            InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{code_order}"),
+                        ],
+                        [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{code_order}")]
+                    ]
+                    await context.bot.send_message(
+                        code_client,
+                        f"⭐ Оцените качество нашего сервиса:",
+                        reply_markup=InlineKeyboardMarkup(rating_keyboard)
+                    )
+                except Exception as re:
+                    logger.error(f"Ошибка отправки запроса отзыва: {re}")
             except Exception as e:
                 logger.error(f"Ошибка отправки кода клиенту: {e}")
                 await update.message.reply_text(
@@ -2352,7 +2376,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 reviews_text = "<i>Отзывов пока нет. Будьте первым!</i>\n\n"
             keyboard = [
-                [InlineKeyboardButton("📢 Наш канал", url="https://t.me/popolnyaskaservice")]
+                [InlineKeyboardButton("📢 Наш канал", url="https://t.me/popolnyaskachannel")]
             ]
             await update.message.reply_text(
                 "⭐ <b>Отзывы наших клиентов</b>\n\n"
