@@ -93,6 +93,18 @@ class TestOrders:
     def test_get_telegram_id_for_order_not_found(self, db):
         assert db.get_telegram_id_for_order("ORD-NOPE") is None
 
+    def test_update_order_amount(self, db):
+        uid = db.add_user(888, "amt", "Amt")
+        db.add_order("ORD-7001", uid, "steam", "500", 500, 93)
+        ok = db.update_order_amount("ORD-7001", 200)
+        assert ok is True
+        order = db.get_order("ORD-7001")
+        assert order["amount_rub"] == 200
+
+    def test_update_order_amount_not_found(self, db):
+        ok = db.update_order_amount("ORD-FAKE", 200)
+        assert ok is False
+
 
 class TestReviews:
     def test_add_review(self, db):
@@ -120,6 +132,12 @@ class TestReviews:
         recent = db.get_recent_reviews()
         assert len(recent) == 1
 
+    def test_get_all_reviews(self, db):
+        db.add_review(1, "u1", "O-1", 5, "a")
+        db.add_review(2, "u2", "O-2", 4, "b")
+        all_reviews = db.get_all_reviews()
+        assert len(all_reviews) == 2
+
 
 class TestStats:
     def test_admin_stats_empty(self, db):
@@ -138,3 +156,65 @@ class TestStats:
         assert stats["total_orders"] == 1
         assert stats["revenue"] == 185
         assert stats["avg_check"] == 185
+
+    def test_get_stats(self, db):
+        stats = db.get_stats()
+        assert stats["users"] == 0
+        assert stats["orders"] == 0
+        assert stats["paid_orders"] == 0
+
+
+class TestGenerateOrderNumber:
+    def test_first_order(self, db):
+        num = db.generate_order_number()
+        assert num == "ORD-1001"
+
+    def test_sequential(self, db):
+        uid = db.add_user(111, "u", "U")
+        db.add_order("ORD-1001", uid, "s", "t", 100, 50)
+        num = db.generate_order_number()
+        assert num == "ORD-1002"
+
+    def test_gap_handling(self, db):
+        uid = db.add_user(111, "u", "U")
+        db.add_order("ORD-1005", uid, "s", "t", 100, 50)
+        num = db.generate_order_number()
+        assert num == "ORD-1006"
+
+
+class TestPendingStates:
+    def test_set_and_get(self, db):
+        db.set_pending_state("screenshot", 123, {"order": "ORD-1001"})
+        result = db.get_pending_state("screenshot", 123)
+        assert result == {"order": "ORD-1001"}
+
+    def test_get_not_found(self, db):
+        assert db.get_pending_state("screenshot", 999) is None
+
+    def test_delete(self, db):
+        db.set_pending_state("email", 123, {"order": "ORD-1001"})
+        db.delete_pending_state("email", 123)
+        assert db.get_pending_state("email", 123) is None
+
+    def test_upsert(self, db):
+        db.set_pending_state("code", 123, {"v": "old"})
+        db.set_pending_state("code", 123, {"v": "new"})
+        result = db.get_pending_state("code", 123)
+        assert result == {"v": "new"}
+
+    def test_get_all(self, db):
+        db.set_pending_state("screenshot", 1, {"a": 1})
+        db.set_pending_state("screenshot", 2, {"a": 2})
+        db.set_pending_state("email", 3, {"a": 3})
+        results = db.get_all_pending_states("screenshot")
+        assert len(results) == 2
+
+    def test_cleanup_expired(self, db):
+        db.set_pending_state("test", 1, {"v": 1})
+        # Всё свежее — ничего не удалится
+        deleted = db.cleanup_expired_states(3600)
+        assert deleted == 0
+
+    def test_log_action(self, db):
+        ok = db.log_action(123, "test_action", "details")
+        assert ok is True

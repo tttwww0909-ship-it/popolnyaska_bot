@@ -9,6 +9,7 @@ venv/
 backups/
 .pytest_cache/
 bot.log*
-fix_vip.py
-patch_fix.py
-handlers_recovered.py
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage

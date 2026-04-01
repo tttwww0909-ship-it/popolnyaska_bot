@@ -21,6 +21,11 @@ BYBIT_UID = os.getenv("BYBIT_UID", "")
 BSC_ADDRESS = os.getenv("BSC_ADDRESS", "")
 TRC20_ADDRESS = os.getenv("TRC20_ADDRESS", "")
 
+# CryptoPay (@CryptoBot) — автоматический приём крипто-платежей
+CRYPTOPAY_TOKEN = os.getenv("CRYPTOPAY_TOKEN", "")
+CRYPTOPAY_WEBHOOK_PATH = os.getenv("CRYPTOPAY_WEBHOOK_PATH", "/cryptopay/webhook")
+CRYPTOPAY_WEBHOOK_PORT = int(os.getenv("CRYPTOPAY_WEBHOOK_PORT", "8443"))
+
 # Проверяем критические переменные
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не установлен в .env файле!")
@@ -55,6 +60,8 @@ if not BSC_ADDRESS:
     logger.warning("⚠️ BSC_ADDRESS не установлен в .env")
 if not TRC20_ADDRESS:
     logger.warning("⚠️ TRC20_ADDRESS не установлен в .env")
+if not CRYPTOPAY_TOKEN:
+    logger.warning("⚠️ CRYPTOPAY_TOKEN не установлен — автооплата CryptoPay отключена")
 
 # Глушим HTTP-спам
 logging.getLogger("httpx").setLevel(logging.WARNING)

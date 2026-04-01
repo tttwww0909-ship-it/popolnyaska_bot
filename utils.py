@@ -5,8 +5,8 @@
 import time
 import logging
 import threading
-import sqlite3
 import requests
+from html import escape as _html_escape
 
 logger = logging.getLogger(__name__)
 
@@ -18,19 +18,22 @@ class TimedDict(dict):
         super().__init__()
         self.max_age = max_age_seconds
         self.timestamps = {}
+        self._lock = threading.Lock()
 
     def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        self.timestamps[key] = time.time()
+        with self._lock:
+            super().__setitem__(key, value)
+            self.timestamps[key] = time.time()
 
     def __getitem__(self, key):
-        if key in self.timestamps:
-            age = time.time() - self.timestamps[key]
-            if age > self.max_age:
-                self.timestamps.pop(key, None)
-                super().__delitem__(key)
-                raise KeyError(f"Record {key} expired")
-        return super().__getitem__(key)
+        with self._lock:
+            if key in self.timestamps:
+                age = time.time() - self.timestamps[key]
+                if age > self.max_age:
+                    self.timestamps.pop(key, None)
+                    super().__delitem__(key)
+                    raise KeyError(f"Record {key} expired")
+            return super().__getitem__(key)
 
     def get(self, key, default=None):
         try:
@@ -47,27 +50,89 @@ class TimedDict(dict):
 
     def cleanup(self):
         """Удаляет все устаревшие записи"""
-        current_time = time.time()
-        expired_keys = [
-            key for key, timestamp in list(self.timestamps.items())
-            if current_time - timestamp > self.max_age
-        ]
-        for key in expired_keys:
-            self.timestamps.pop(key, None)
-            try:
-                dict.__delitem__(self, key)
-            except KeyError:
-                pass
+        with self._lock:
+            current_time = time.time()
+            expired_keys = [
+                key for key, timestamp in list(self.timestamps.items())
+                if current_time - timestamp > self.max_age
+            ]
+            for key in expired_keys:
+                self.timestamps.pop(key, None)
+                try:
+                    dict.__delitem__(self, key)
+                except KeyError:
+                    pass
+
+
+class PersistentTimedDict(TimedDict):
+    """TimedDict, который дополнительно персистирует данные в SQLite.
+
+    При set — пишет в память + DB.
+    При delete — удаляет из памяти + DB.
+    load() — загружает из DB при старте.
+    """
+
+    def __init__(self, state_type: str, max_age_seconds: int = 86400):
+        super().__init__(max_age_seconds=max_age_seconds)
+        self.state_type = state_type
+
+    def _db(self):
+        from database import db
+        return db
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        try:
+            self._db().set_pending_state(self.state_type, int(key), value if isinstance(value, dict) else {"v": value})
+        except Exception:
+            pass
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        try:
+            self._db().delete_pending_state(self.state_type, int(key))
+        except Exception:
+            pass
+
+    def pop(self, key, *args):
+        result = super().pop(key, *args)
+        try:
+            self._db().delete_pending_state(self.state_type, int(key))
+        except Exception:
+            pass
+        return result
+
+    def load(self):
+        """Загружает все записи из DB в память"""
+        try:
+            rows = self._db().get_all_pending_states(self.state_type)
+            for key_id, value, _created_at in rows:
+                if isinstance(value, dict) and list(value.keys()) == ["v"]:
+                    super().__setitem__(key_id, value["v"])
+                else:
+                    super().__setitem__(key_id, value)
+                self.timestamps[key_id] = time.time()
+            if rows:
+                logger.info(f"Загружено {len(rows)} записей для {self.state_type}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки {self.state_type}: {e}")
+
+    def cleanup(self):
+        super().cleanup()
+        try:
+            self._db().cleanup_expired_states(self.max_age)
+        except Exception:
+            pass
 
 
 # === IN-MEMORY ХРАНИЛИЩА ===
 ORDER_USER_MAP = TimedDict(max_age_seconds=86400)     # 24 часа
 ORDER_INFO_MAP = TimedDict(max_age_seconds=604800)    # 7 дней
-ORDER_LOCK = {}       # Защита от дублей: {order_number: True}
-AWAITING_SCREENSHOT = TimedDict(max_age_seconds=86400)
-AWAITING_EMAIL = TimedDict(max_age_seconds=86400)
-AWAITING_CODE = {}    # admin_id: {"order_num": ..., "client_id": ...}
-AWAITING_REVIEW_COMMENT = {}  # user_id: {"order_num": ..., "rating": ...}
+ORDER_LOCK = TimedDict(max_age_seconds=300)           # 5 мин — защита от дублей
+AWAITING_SCREENSHOT = PersistentTimedDict("screenshot", max_age_seconds=86400)
+AWAITING_EMAIL = PersistentTimedDict("email", max_age_seconds=86400)
+AWAITING_CODE = PersistentTimedDict("code", max_age_seconds=3600)       # 1 час
+AWAITING_REVIEW_COMMENT = PersistentTimedDict("review_comment", max_age_seconds=3600)  # 1 час
 
 _ORDER_COUNTER_LOCK = threading.Lock()
 
@@ -120,6 +185,11 @@ def validate_email(email: str) -> bool:
 
 
 # === ФОРМАТИРОВАНИЕ ===
+def esc(text) -> str:
+    """HTML-экранирование, безопасно для None."""
+    return _html_escape(str(text)) if text else ""
+
+
 def fmt(num):
     """Форматирует число с пробелами между тысячами: 25000 → 25 000"""
     return f"{int(num):,}".replace(",", " ")
@@ -206,9 +276,9 @@ def smart_round(price: int) -> int:
 def get_us_commission(amount_usd: int) -> float:
     """Ступенчатая комиссия для US Gift Cards.
 
-    5–50 USD   → 15%
-    100–300 USD → 12%
-    500+ USD    → 11%
+    ≤ 50 USD   → 15%
+    51–300 USD  → 12%
+    300+ USD    → 11%
     """
     if amount_usd <= 50:
         return 1.15
@@ -234,33 +304,23 @@ def get_kz_commission(amount_kzt: int) -> float:
 def generate_order():
     """Генерация номера ордера. Lock защищает от race condition."""
     with _ORDER_COUNTER_LOCK:
-        try:
-            max_number = 1000
-            try:
-                conn = sqlite3.connect("orders.db")
-                c = conn.cursor()
-                c.execute("SELECT order_number FROM orders ORDER BY id DESC LIMIT 1")
-                row = c.fetchone()
-                conn.close()
-                if row:
-                    try:
-                        db_number = int(row[0].split("-")[1])
-                        max_number = max(max_number, db_number)
-                    except (ValueError, IndexError):
-                        pass
-            except Exception as e:
-                logger.warning(f"Ошибка чтения БД для генерации ордера: {e}")
-            return f"ORD-{max_number + 1}"
-        except Exception as e:
-            logger.error(f"Ошибка при генерации ордера: {e}")
-            return f"ORD-{int(time.time())}"
+        from database import db
+        return db.generate_order_number()
 
 
 def cleanup_memory():
     """Очищает память от устаревших данных"""
     try:
-        ORDER_USER_MAP.cleanup()
-        ORDER_INFO_MAP.cleanup()
+        for store in (ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
+                      AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE,
+                      AWAITING_REVIEW_COMMENT):
+            store.cleanup()
+        # USER_ORDER_TIMES — plain dict, чистим вручную
+        now = time.time()
+        expired = [uid for uid, times in USER_ORDER_TIMES.items()
+                   if not any(now - t < ORDER_PERIOD for t in times)]
+        for uid in expired:
+            USER_ORDER_TIMES.pop(uid, None)
         logger.info("Память очищена")
     except Exception as e:
         logger.error(f"Ошибка при очистке памяти: {e}")

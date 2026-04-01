@@ -13,18 +13,28 @@ from telegram.ext import ContextTypes
 from config import (
     ADMIN_ID, PRICES, GIFT_CARD_TARIFFS, REGION_DISPLAY, REGION_COMMISSION,
     ORDER_STATUSES, FAQ_KEYBOARD, YOOMONEY_WALLET, OZON_PAY_URL,
-    BYBIT_UID, BSC_ADDRESS, TRC20_ADDRESS,
+    BYBIT_UID, BSC_ADDRESS, TRC20_ADDRESS, CRYPTOPAY_TOKEN,
     GIFT_CARD_LABELS, REGION_DESCRIPTIONS, GIFT_CARD_HINTS,
 )
 from utils import (
-    fmt, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, smart_round, check_spam, mark_order_created, generate_order,
+    fmt, esc, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, smart_round, check_spam, mark_order_created, generate_order,
     cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
+from keyboards import (
+    region_selection_keyboard, admin_panel_keyboard, rating_keyboard,
+    payment_buttons, crypto_payment_text, vip_promo_text, vip_promo_keyboard,
+    cryptopay_enabled, crypto_payment_buttons, cryptopay_invoice_text,
+    USDT_GUIDE_TEXT,
+)
 from sheets import add_order_to_sheet, update_payment_method, update_order_status, update_order_amount_in_sheet, find_order_user_in_sheets
 from database import db
+from cryptopay import CryptoPay
 
 logger = logging.getLogger(__name__)
+
+# CryptoPay singleton (None если токен не задан)
+_cryptopay = CryptoPay(CRYPTOPAY_TOKEN) if CRYPTOPAY_TOKEN else None
 
 
 async def _get_user_orders_msg(telegram_id: int) -> tuple:
@@ -39,11 +49,11 @@ async def _get_user_orders_msg(telegram_id: int) -> tuple:
         rub = o.get('amount_rub', 0)
         date = str(o.get('created_at', ''))[:16]
         msg += (
-            f"🔹 <b>{o['order_number']}</b>\n"
-            f"   Тариф: {tariff}\n"
+            f"🔹 <b>{esc(o['order_number'])}</b>\n"
+            f"   Тариф: {esc(tariff)}\n"
             f"   Сумма: {fmt(rub)} ₽\n"
-            f"   Статус: {status}\n"
-            f"   Дата: {date}\n\n"
+            f"   Статус: {esc(status)}\n"
+            f"   Дата: {esc(date)}\n\n"
         )
     if len(orders) > 10:
         msg += f"<i>...и ещё {len(orders) - 10} заказ(ов)</i>"
@@ -108,11 +118,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Попытка доступа к админ-панели от {update.message.from_user.id}")
             return
 
-        keyboard = [
-            [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
-            [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-            [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
-        ]
+        keyboard = admin_panel_keyboard()
         await update.message.reply_text(
             "⚙️ Админ панель",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -380,33 +386,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             saving = order["rub"] - rub_discounted
             usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
             await query.edit_message_text(
-                f"💎 <b>Крупный заказ — особые условия!</b>\n\n"
-                f"Сумма вашего заказа превышает 8 500 ₽. Для обеспечения максимальной "
-                f"безопасности и скорости обработки крупные платежи принимаются в USDT.\n\n"
-                f"<b>Ваши преимущества:</b>\n"
-                f"✅ Скидка 2% — вы экономите <b>{fmt(saving)} ₽</b>\n"
-                f"✅ Итоговая сумма: <b>{fmt(rub_discounted)} ₽</b>{usdt_suffix}\n"
-                f"✅ Приоритетная выдача кода\n"
-                f"✅ Отсутствие рисков блокировки банком\n\n"
-                f"<i>Нет криптокошелька? Оператор поможет за 2 минуты.</i>",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"💎 Оплатить криптой (−2%)", callback_data=f"vip_crypto_{order_number}")],
-                    [InlineKeyboardButton("📱 Как купить USDT за 2 мин?", callback_data="vip_usdt_guide")],
-                    [InlineKeyboardButton("💬 Связаться с оператором", url="https://t.me/popolnyaska_halper")],
-                ]),
+                vip_promo_text(order_number, saving, rub_discounted, usdt_suffix),
+                reply_markup=InlineKeyboardMarkup(vip_promo_keyboard(order_number)),
                 parse_mode="HTML"
             )
             return
 
         # === ПОПОЛНЕНИЕ APPLE ID — ВЫБОР РЕГИОНА ===
         if query.data == "apple_topup":
-            keyboard = [
-                [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
-                [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
-                [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
-                [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
-            ]
+            keyboard = region_selection_keyboard()
             context.user_data.pop("awaiting_apple", None)
             await query.edit_message_text(
                 "🍏 Пополнение Apple ID\n\nВыбери регион своего Apple ID:",
@@ -641,32 +629,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     saving = order["rub"] - rub_discounted
                     usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
                     await query.edit_message_text(
-                        f"💎 <b>Крупный заказ — особые условия!</b>\n\n"
-                        f"Сумма вашего заказа превышает 8 500 ₽. Для обеспечения максимальной "
-                        f"безопасности и скорости обработки крупные платежи принимаются в USDT.\n\n"
-                        f"<b>Ваши преимущества:</b>\n"
-                        f"✅ Скидка 2% — вы экономите <b>{fmt(saving)} ₽</b>\n"
-                        f"✅ Итоговая сумма: <b>{fmt(rub_discounted)} ₽</b>{usdt_suffix}\n"
-                        f"✅ Приоритетная выдача кода\n"
-                        f"✅ Отсутствие рисков блокировки банком\n\n"
-                        f"<i>Нет криптокошелька? Оператор поможет за 2 минуты.</i>",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton(f"💎 Оплатить криптой (−2%)", callback_data=f"vip_crypto_{order_number}")],
-                            [InlineKeyboardButton("📱 Как купить USDT за 2 мин?", callback_data="vip_usdt_guide")],
-                            [InlineKeyboardButton("💬 Связаться с оператором", url="https://t.me/popolnyaska_halper")],
-                        ]),
+                        vip_promo_text(order_number, saving, rub_discounted, usdt_suffix),
+                        reply_markup=InlineKeyboardMarkup(vip_promo_keyboard(order_number)),
                         parse_mode="HTML"
                     )
                     context.user_data["rub_discounted"] = rub_discounted
                     context.user_data["vip_order_number"] = order_number
                     logger.info(f"Заказ {order_number} — промо VIP-экран (>{8500}₽)")
                 else:
-                    pay_buttons = [
-                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
-                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
-                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
-                    ]
+                    pay_btns = payment_buttons(order_number, is_large_order=False)
                     usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
                     await query.edit_message_text(
                         f"✅ Заявка сформирована!\n\n"
@@ -674,7 +645,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Тариф: <b>{order['tariff']}</b>\n"
                         f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n\n"
                         f"Выберите способ оплаты:",
-                        reply_markup=InlineKeyboardMarkup(pay_buttons),
+                        reply_markup=InlineKeyboardMarkup(pay_btns),
                         parse_mode="HTML"
                     )
                     logger.info(f"Заказ {order_number} — выбор способа оплаты")
@@ -763,66 +734,92 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ORDER_INFO_MAP[order_number]["rub"] = rub_discounted
                 ORDER_INFO_MAP[order_number]["usdt"] = amount_usdt
             await asyncio.to_thread(update_order_amount_in_sheet, order_number, rub_discounted)
-            await query.edit_message_text(
-                f"💎 VIP-оплата криптой (USDT)\n\n"
-                f"📦 Заказ: <b>{order_number}</b>\n"
-                f"💰 К оплате: <b>{amount_usdt} USDT</b> ({fmt(rub_discounted)} ₽)\n\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📲 <b>Способ 1: Bybit (перевод по UID)</b>\n"
-                f"UID: <code>{BYBIT_UID}</code>\n"
-                f"Сумма: <b>{amount_usdt} USDT</b>\n\n"
-                f"📲 <b>Способ 2: Bybit (адрес)</b>\n"
-                f"Адрес: <code>{BSC_ADDRESS}</code>\n"
-                f"Сеть: <b>BSC (BEP20)</b> | Монета: <b>USDT</b>\n\n"
-                f"📲 <b>Способ 3: Телеграм кошелёк</b>\n"
-                f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
-                f"Сеть: <b>Tron (TRC20)</b> | Монета: <b>USDT</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"После перевода нажмите «✅ Я оплатил» и отправьте скриншот подтверждения.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
-                    [InlineKeyboardButton("⬅️ Назад", callback_data=f"confirm_{order_number}")]
-                ]),
-                parse_mode="HTML"
-            )
+
+            # CryptoPay: создаём invoice если токен задан
+            pay_url = None
+            if _cryptopay and amount_usdt:
+                try:
+                    invoice = await _cryptopay.create_invoice(amount_usdt, order_number, description=f"VIP заказ {order_number}")
+                    pay_url = invoice.get("mini_app_invoice_url") or invoice.get("pay_url")
+                    context.user_data["cryptopay_invoice_id"] = invoice.get("invoice_id")
+                except Exception as e:
+                    logger.warning("CryptoPay invoice failed (VIP), fallback to manual: %s", e)
+
+            if pay_url:
+                await query.edit_message_text(
+                    cryptopay_invoice_text(order_number, amount_usdt, amount_rub=rub_discounted, is_vip=True),
+                    reply_markup=InlineKeyboardMarkup(crypto_payment_buttons(order_number, pay_url)),
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    crypto_payment_text(order_number, amount_usdt, amount_rub=rub_discounted, is_vip=True),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
+                        [InlineKeyboardButton("⬅️ Назад", callback_data=f"confirm_{order_number}")]
+                    ]),
+                    parse_mode="HTML"
+                )
             await asyncio.to_thread(update_payment_method, order_number, "Crypto (VIP)")
             if order_number in ORDER_INFO_MAP:
                 ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto (VIP)'
             logger.info(f"Клиент {query.from_user.id} выбрал VIP крипто-оплату для {order_number}")
 
-        elif query.data.startswith("pay_crypto_"):
+        elif query.data.startswith("pay_crypto_") and not query.data.startswith("pay_crypto_manual_"):
             order_number = query.data.replace("pay_crypto_", "")
             order = context.user_data.get("order")
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
             amount_usdt = context.user_data.get("amount_usdt", 0)
+
+            # CryptoPay: создаём invoice если токен задан
+            pay_url = None
+            if _cryptopay and amount_usdt:
+                try:
+                    invoice = await _cryptopay.create_invoice(amount_usdt, order_number)
+                    pay_url = invoice.get("mini_app_invoice_url") or invoice.get("pay_url")
+                    context.user_data["cryptopay_invoice_id"] = invoice.get("invoice_id")
+                except Exception as e:
+                    logger.warning("CryptoPay invoice failed, fallback to manual: %s", e)
+
+            if pay_url:
+                await query.edit_message_text(
+                    cryptopay_invoice_text(order_number, amount_usdt),
+                    reply_markup=InlineKeyboardMarkup(crypto_payment_buttons(order_number, pay_url)),
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    crypto_payment_text(order_number, amount_usdt),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
+                        [InlineKeyboardButton("⬅️ Назад к способам оплаты", callback_data="back_to_payment")]
+                    ]),
+                    parse_mode="HTML"
+                )
+            await asyncio.to_thread(update_payment_method, order_number, "Crypto")
+            if order_number in ORDER_INFO_MAP:
+                ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto'
+            logger.info(f"Клиент {query.from_user.id} выбрал крипто-оплату для {order_number}")
+
+        # === РУЧНАЯ КРИПТО-ОПЛАТА (Bybit/TRC20) — fallback от CryptoPay ===
+        elif query.data.startswith("pay_crypto_manual_"):
+            order_number = query.data.replace("pay_crypto_manual_", "")
+            order = context.user_data.get("order")
+            if not order:
+                await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
+                return
+            amount_usdt = context.user_data.get("amount_usdt", 0)
             await query.edit_message_text(
-                f"💎 Оплата криптой (USDT)\n\n"
-                f"📦 Заказ: <b>{order_number}</b>\n"
-                f"💰 К оплате: <b>{amount_usdt} USDT</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📲 <b>Способ 1: Bybit (перевод по UID)</b>\n"
-                f"UID: <code>{BYBIT_UID}</code>\n"
-                f"Сумма: <b>{amount_usdt} USDT</b>\n\n"
-                f"📲 <b>Способ 2: Bybit (адрес)</b>\n"
-                f"Адрес: <code>{BSC_ADDRESS}</code>\n"
-                f"Сеть: <b>BSC (BEP20)</b> | Монета: <b>USDT</b>\n\n"
-                f"📲 <b>Способ 3: Телеграм кошелёк</b>\n"
-                f"Адрес: <code>{TRC20_ADDRESS}</code>\n"
-                f"Сеть: <b>Tron (TRC20)</b> | Монета: <b>USDT</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"После перевода нажмите «✅ Я оплатил» и отправьте скриншот подтверждения.",
+                crypto_payment_text(order_number, amount_usdt),
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
                     [InlineKeyboardButton("⬅️ Назад к способам оплаты", callback_data="back_to_payment")]
                 ]),
                 parse_mode="HTML"
             )
-            await asyncio.to_thread(update_payment_method, order_number, "Crypto")
-            if order_number in ORDER_INFO_MAP:
-                ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto'
-            logger.info(f"Клиент {query.from_user.id} выбрал крипто-оплату для {order_number}")
+            logger.info(f"Клиент {query.from_user.id} выбрал ручную крипто-оплату для {order_number}")
 
         # === ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (все методы) ===
         elif query.data.startswith("paid_crypto_") or query.data.startswith("paid_yoomoney_") or query.data.startswith("paid_ozon_"):
@@ -941,8 +938,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_payment")]])
             )
 
-            username_link = f'<a href="https://t.me/{username}">@{username}</a>' if query.from_user.username else first_name
-            client_info = f'Имя: <a href="tg://user?id={user_id}">{first_name}</a>\n' \
+            username_link = f'<a href="https://t.me/{esc(username)}">@{esc(username)}</a>' if query.from_user.username else esc(first_name)
+            client_info = f'Имя: <a href="tg://user?id={user_id}">{esc(first_name)}</a>\n' \
                          f'Ник: {username_link}\n' \
                          f'ID: <code>{user_id}</code>'
 
@@ -982,6 +979,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === КНОПКА ДЛЯ АДМИНА — ОТКРЫТЬ ЛС ===
         elif query.data.startswith("open_client_dm_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("❌ У вас нет доступа", show_alert=True)
+                return
             parts = query.data.split("_")
             client_id = int(parts[3])
             reason = parts[4] if len(parts) > 4 else "order"
@@ -998,20 +998,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if reason == "support":
                 msg = (
-                    f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{client_name}</a> (ID: <code>{client_id}</code>)\n\n'
+                    f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{esc(client_name)}</a> (ID: <code>{client_id}</code>)\n\n'
                     f"Клиент запросил связь с менеджером.\n"
                     f"Если у него есть заказ:\n"
-                    f"  • Регион: {client_region or 'уточнить'}\n"
-                    f"  • Тариф: {client_tariff or 'уточнить'}\n\n"
+                    f"  • Регион: {esc(client_region) or 'уточнить'}\n"
+                    f"  • Тариф: {esc(client_tariff) or 'уточнить'}\n\n"
                     f"Напишите ему в личку и помогите!"
                 )
             else:
                 msg = (
-                    f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{client_name}</a> (ID: <code>{client_id}</code>)\n\n'
+                    f'💬 Откройте ЛС с клиентом <a href="tg://user?id={client_id}">{esc(client_name)}</a> (ID: <code>{client_id}</code>)\n\n'
                     f"<b>📦 Заказ:</b>\n"
-                    f"  • Номер: {reason}\n"
-                    f"  • Регион: {client_region}\n"
-                    f"  • Тариф: {client_tariff}\n\n"
+                    f"  • Номер: {esc(reason)}\n"
+                    f"  • Регион: {esc(client_region)}\n"
+                    f"  • Тариф: {esc(client_tariff)}\n\n"
                     f"Напишите ему об оплате или доступе."
                 )
             await query.edit_message_text(msg, parse_mode="HTML")
@@ -1038,10 +1038,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     region_display = REGION_DISPLAY.get(region_code, region_code)
                 else:
                     region_display = o.get('service', '—')
-                msg += f"🔹 <b>{o['order_number']}</b>\n"
-                msg += f"   Статус: {o.get('status', '—')}\n"
-                msg += f"   Сервис: {region_display}\n"
-                msg += f"   Тариф: {o.get('tariff', '—')}\n"
+                msg += f"🔹 <b>{esc(o['order_number'])}</b>\n"
+                msg += f"   Статус: {esc(o.get('status', '—'))}\n"
+                msg += f"   Сервис: {esc(region_display)}\n"
+                msg += f"   Тариф: {esc(o.get('tariff', '—'))}\n"
                 msg += f"   Сумма: {o.get('amount_rub', 0)} ₽\n"
                 msg += f"   ID: <code>{o.get('telegram_id', '—')}</code>\n\n"
 
@@ -1210,23 +1210,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     try:
                         if new_status == "completed":
-                            rating_keyboard = [
-                                [
-                                    InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{order_num}"),
-                                    InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{order_num}"),
-                                    InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{order_num}"),
-                                    InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{order_num}"),
-                                    InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{order_num}"),
-                                ],
-                                [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{order_num}")]
-                            ]
                             await context.bot.send_message(
                                 user_id,
                                 f"📦 <b>Заказ {order_num} выполнен!</b>\n\n"
                                 f"✅ Спасибо за покупку!\n\n"
                                 f"⭐ Оцените качество нашего сервиса:",
                                 parse_mode="HTML",
-                                reply_markup=InlineKeyboardMarkup(rating_keyboard)
+                                reply_markup=InlineKeyboardMarkup(rating_keyboard(order_num))
                             )
                         else:
                             await context.bot.send_message(
@@ -1286,16 +1276,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if client_id:
                 try:
-                    rating_keyboard = [
-                        [
-                            InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{order_num}"),
-                            InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{order_num}"),
-                            InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{order_num}"),
-                            InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{order_num}"),
-                            InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{order_num}"),
-                        ],
-                        [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{order_num}")]
-                    ]
                     await context.bot.send_message(
                         client_id,
                         f"🎉 <b>Пополнение выполнено!</b>\n\n"
@@ -1304,7 +1284,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Спасибо, что воспользовались нашим сервисом! 🍏\n\n"
                         f"⭐ Оцените качество нашего сервиса:",
                         parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(rating_keyboard)
+                        reply_markup=InlineKeyboardMarkup(rating_keyboard(order_num))
                     )
                 except Exception as e:
                     logger.error(f"Ошибка уведомления клиента о пополнении: {e}")
@@ -1383,11 +1363,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == "back_to_admin":
             if query.from_user.id != ADMIN_ID:
                 return
-            keyboard = [
-                [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
-                [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-                [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
-            ]
+            keyboard = admin_panel_keyboard()
             await query.edit_message_text("⚙️ Админ панель", reply_markup=InlineKeyboardMarkup(keyboard))
 
     except BadRequest as e:
@@ -1397,14 +1373,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка в buttons: {e}")
             try:
                 await query.edit_message_text("❌ Произошла ошибка. Попробуйте позже.")
-            except:
-                pass
+            except Exception:
+                logger.debug("Не удалось отправить сообщение об ошибке (BadRequest fallback)")
     except Exception as e:
         logger.error(f"Ошибка в buttons: {e}")
         try:
             await query.edit_message_text("❌ Произошла ошибка. Попробуйте позже.")
-        except:
-            pass
+        except Exception:
+            logger.debug("Не удалось отправить сообщение об ошибке (general fallback)")
 
 
 # ═══════════════════════════════════════════════
@@ -1442,8 +1418,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"<b>Сумма:</b> {sum_line}\n"
                     f"<b>Оплата:</b> {payment_line}\n\n"
                     f"<b>👤 Клиент:</b>\n"
-                    f"Имя: {update.message.from_user.first_name or 'Неизвестно'}\n"
-                    f"Ник: @{update.message.from_user.username if update.message.from_user.username else 'нет'}\n"
+                    f"Имя: {esc(update.message.from_user.first_name) or 'Неизвестно'}\n"
+                    f"Ник: @{esc(update.message.from_user.username) if update.message.from_user.username else 'нет'}\n"
                     f"ID: <code>{user_id}</code>"
                 ),
                 reply_markup=InlineKeyboardMarkup([
@@ -1503,30 +1479,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info(f"Код отправлен клиенту {code_client} для заказа {code_order}")
                 try:
-                    rating_keyboard = [
-                        [
-                            InlineKeyboardButton("1⭐️", callback_data=f"review_rate_1_{code_order}"),
-                            InlineKeyboardButton("2⭐️", callback_data=f"review_rate_2_{code_order}"),
-                            InlineKeyboardButton("3⭐️", callback_data=f"review_rate_3_{code_order}"),
-                            InlineKeyboardButton("4⭐️", callback_data=f"review_rate_4_{code_order}"),
-                            InlineKeyboardButton("5⭐️", callback_data=f"review_rate_5_{code_order}"),
-                        ],
-                        [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"review_skip_{code_order}")]
-                    ]
                     await context.bot.send_message(
                         code_client,
                         f"⭐ Оцените качество нашего сервиса:",
-                        reply_markup=InlineKeyboardMarkup(rating_keyboard)
+                        reply_markup=InlineKeyboardMarkup(rating_keyboard(code_order))
                     )
-                except Exception as re:
-                    logger.error(f"Ошибка отправки запроса отзыва: {re}")
+                except Exception as exc:
+                    logger.error(f"Ошибка отправки запроса отзыва: {exc}")
             except Exception as e:
                 logger.error(f"Ошибка отправки кода клиенту: {e}")
-                await update.message.reply_text(f"❌ Не удалось отправить код клиенту. Ошибка: {e}")
+                await update.message.reply_text(f"❌ Не удалось отправить код клиенту. Ошибка: {esc(str(e))}")
                 return
 
             await update.message.reply_text(
-                f"✅ Код отправлен клиенту!\n\n📦 Заказ: <b>{code_order}</b>\n📊 Статус: Выполнен",
+                f"✅ Код отправлен клиенту!\n\n📦 Заказ: <b>{code_order}</b>\n📊 Статус: {ORDER_STATUSES['completed']}",
                 parse_mode="HTML"
             )
             return
@@ -1565,8 +1531,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📦 Заказ: <b>{order_number}</b>\n\n"
                         f"{order_details}"
                         f"📧 Почта для пополнения:\n"
-                        f"<code>{email}</code>\n\n"
-                        f"👤 Клиент:\nИмя: {user_name}\nНик: {username}\nID: <code>{user_id}</code>",
+                        f"<code>{esc(email)}</code>\n\n"
+                        f"👤 Клиент:\nИмя: {esc(user_name)}\nНик: {esc(username)}\nID: <code>{user_id}</code>",
                         reply_markup=InlineKeyboardMarkup(admin_keyboard),
                         parse_mode="HTML"
                     )
@@ -1574,7 +1540,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Ошибка отправки почты админу: {e}")
 
                 await update.message.reply_text(
-                    f"✅ Почта <b>{email}</b> получена!\n\n"
+                    f"✅ Почта <b>{esc(email)}</b> получена!\n\n"
                     f"📦 Заказ: <b>{order_number}</b>\n\n"
                     f"Мы пополним ваш Apple ID в ближайшее время. Ожидайте уведомления!",
                     parse_mode="HTML"
@@ -1604,13 +1570,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === REPLY KEYBOARD КНОПКИ ===
         if text == "🍏 Пополнить Apple ID":
-            keyboard = [
-                [InlineKeyboardButton("🇺🇸 США", callback_data="region_US")],
-                [InlineKeyboardButton("🇹🇷 Турция", callback_data="region_TR")],
-                [InlineKeyboardButton("🇰🇿 Казахстан", callback_data="region_KZ")],
-                [InlineKeyboardButton("🇦🇪 ОАЭ Premium", callback_data="region_AE")],
-                [InlineKeyboardButton("🇸🇦 Саудовская Аравия Premium", callback_data="region_SA")]
-            ]
+            keyboard = region_selection_keyboard()
             await update.message.reply_text(
                 "🍏 Пополнение Apple ID\n\nВыбери регион своего Apple ID:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1704,6 +1664,18 @@ async def periodic_cleanup(context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный обработчик ошибок"""
     logger.error(f"Ошибка при обработке запроса: {context.error}", exc_info=context.error)
+    # Уведомить пользователя
+    try:
+        if isinstance(update, Update):
+            chat = update.effective_chat
+            if chat:
+                await context.bot.send_message(
+                    chat.id,
+                    "⚠️ Произошла ошибка. Попробуйте ещё раз или напишите /start",
+                )
+    except Exception:
+        logger.debug("Не удалось отправить уведомление пользователю")
+    # Уведомить админа
     try:
         await context.bot.send_message(
             ADMIN_ID,
@@ -1711,4 +1683,99 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
     except Exception:
-        pass
+        logger.debug("Не удалось отправить уведомление об ошибке админу")
+
+
+async def handle_cryptopay_webhook(bot, payload: dict):
+    """Обрабатывает вебхук от CryptoPay при успешной оплате.
+
+    Автоматически подтверждает оплату: обновляет статус, уведомляет клиента и админа.
+    """
+    if payload.get("update_type") != "invoice_paid":
+        return
+
+    invoice = payload.get("payload", {})
+    order_number = invoice.get("payload")  # мы передали order_number как payload при создании
+    if not order_number:
+        logger.warning("CryptoPay webhook: no order_number in payload")
+        return
+
+    amount = invoice.get("amount", "?")
+    asset = invoice.get("asset", "USDT")
+    logger.info(f"CryptoPay: оплата получена — заказ {order_number}, {amount} {asset}")
+
+    # Обновляем статус на "Оплачен"
+    status_name = ORDER_STATUSES.get("paid", "Оплачен")
+    success = await asyncio.to_thread(update_order_status, order_number, status_name)
+    if not success:
+        logger.error(f"CryptoPay webhook: не удалось обновить статус для {order_number}")
+        return
+
+    # Ищем user_id
+    user_id = ORDER_USER_MAP.get(order_number)
+    order_info = ORDER_INFO_MAP.get(order_number, {})
+    if not user_id:
+        user_id = order_info.get("user_id")
+    if not user_id:
+        user_id = await asyncio.to_thread(db.get_telegram_id_for_order, order_number)
+
+    order_region = order_info.get("region", "")
+    is_gift_card = order_region in ("TR", "US", "AE", "SA")
+
+    # Уведомляем клиента
+    if user_id:
+        try:
+            if is_gift_card:
+                await bot.send_message(
+                    user_id,
+                    "✅ <b>Оплата подтверждена автоматически!</b>\n\n"
+                    f"📦 Заказ: <b>{order_number}</b>\n"
+                    f"💰 Сумма: <b>{amount} {asset}</b>\n\n"
+                    "⏳ Ожидайте получения кода — бот отправит его вам.\n\n"
+                    "⚠️ <b>Обратите внимание:</b> после получения кода средства возврату не подлежат.",
+                    parse_mode="HTML"
+                )
+            else:
+                await bot.send_message(
+                    user_id,
+                    "✅ <b>Оплата подтверждена автоматически!</b>\n\n"
+                    f"📦 Заказ: <b>{order_number}</b>\n"
+                    f"💰 Сумма: <b>{amount} {asset}</b>\n\n"
+                    "📧 Теперь отправьте вашу почту Apple ID для пополнения:",
+                    parse_mode="HTML"
+                )
+                AWAITING_EMAIL[user_id] = order_number
+        except Exception as e:
+            logger.error(f"CryptoPay: ошибка уведомления клиента {user_id}: {e}")
+
+    # Уведомляем админа
+    try:
+        first_name = order_info.get("first_name", "—")
+        username = order_info.get("username", "—")
+        tariff = order_info.get("tariff", "—")
+        region = REGION_DISPLAY.get(order_region, order_region or "—")
+
+        admin_text = (
+            f"⚡ <b>CryptoPay: автоплатёж</b>\n\n"
+            f"📦 Заказ: <b>{order_number}</b>\n"
+            f"👤 Клиент: {first_name} (@{username})\n"
+            f"🌍 Регион: {region}\n"
+            f"📱 Тариф: {tariff}\n"
+            f"💰 Сумма: <b>{amount} {asset}</b>\n"
+            f"📊 Статус: <b>{status_name}</b>"
+        )
+
+        admin_buttons = []
+        if is_gift_card and user_id:
+            admin_buttons.append([InlineKeyboardButton("📤 Отправить код клиенту", callback_data=f"send_code_{order_number}_{user_id}")])
+        if user_id:
+            admin_buttons.append([InlineKeyboardButton("💬 Связаться с клиентом", url=f"tg://user?id={user_id}")])
+
+        await bot.send_message(
+            ADMIN_ID,
+            admin_text,
+            reply_markup=InlineKeyboardMarkup(admin_buttons) if admin_buttons else None,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"CryptoPay: ошибка уведомления админа: {e}")

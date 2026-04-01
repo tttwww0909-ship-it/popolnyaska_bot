@@ -8,7 +8,6 @@ import threading
 from datetime import datetime
 
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 
 from config import ORDER_STATUSES, REGION_DISPLAY, MONTH_NAMES
 from utils import fmt, ORDER_INFO_MAP
@@ -18,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # === КЭШИ ===
 _sheet_cache = {"sheet": None, "time": 0}
+_sheet_cache_lock = threading.Lock()
 _SHEET_CACHE_TTL = 300
 
 _last_stats_update = 0
@@ -26,24 +26,20 @@ _STATS_UPDATE_MIN_INTERVAL = 60
 
 def get_sheet():
     """Получает объект таблицы с кэшированием (5 мин)"""
-    now = time.time()
-    if _sheet_cache["sheet"] and now - _sheet_cache["time"] < _SHEET_CACHE_TTL:
-        return _sheet_cache["sheet"]
-    try:
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
-        client = gspread.authorize(creds)
-        sheet = client.open("popolnyaska_bot").sheet1
-        _sheet_cache["sheet"] = sheet
-        _sheet_cache["time"] = now
-        logger.debug("Подключение к Google Sheets успешно")
-        return sheet
-    except Exception as e:
-        logger.error(f"Ошибка подключения к Google Sheets: {e}")
-        return None
+    with _sheet_cache_lock:
+        now = time.time()
+        if _sheet_cache["sheet"] and now - _sheet_cache["time"] < _SHEET_CACHE_TTL:
+            return _sheet_cache["sheet"]
+        try:
+            client = gspread.service_account(filename="service_account.json")
+            sheet = client.open("popolnyaska_bot").sheet1
+            _sheet_cache["sheet"] = sheet
+            _sheet_cache["time"] = now
+            logger.debug("Подключение к Google Sheets успешно")
+            return sheet
+        except Exception as e:
+            logger.error(f"Ошибка подключения к Google Sheets: {e}")
+            return None
 
 
 def _run_stats_update():
@@ -200,43 +196,9 @@ def update_stats_sheet():
 
 
 def add_order_to_sheet(order_data):
-    """Добавляет заказ в таблицу и в БД"""
+    """Добавляет заказ в БД (авторитетный источник) и в Google Sheets (best-effort)"""
     try:
-        current_sheet = get_sheet()
-        if current_sheet:
-            for _attempt in range(3):
-                try:
-                    current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    current_sheet.append_row([
-                        order_data["number"],
-                        order_data["user_id"],
-                        order_data["username"],
-                        order_data.get("region", "KZ"),
-                        order_data["tariff"],
-                        order_data["rub"],
-                        "",
-                        current_date,
-                        ORDER_STATUSES["pending"]
-                    ])
-                    added_cell = current_sheet.find(order_data["number"])
-                    if added_cell:
-                        db.set_order_sheets_row(order_data["number"], added_cell.row)
-                    logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
-                    break
-                except gspread.exceptions.APIError as e:
-                    if _attempt < 2:
-                        logger.warning(f"⚠️ gspread APIError (попытка {_attempt+1}/3): {e}")
-                        import time as _time
-                        _time.sleep(2 ** _attempt)
-                        _sheet_cache["sheet"] = None
-                        _sheet_cache["time"] = 0
-                        current_sheet = get_sheet()
-                    else:
-                        logger.error(f"❌ gspread APIError после 3 попыток: {e}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Ошибка добавления в Google Sheets: {e}")
-                    break
-
+        # 1. Сначала пишем в SQLite (авторитетный источник)
         user_id = db.add_user(
             telegram_id=order_data["user_id"],
             username=order_data["username"],
@@ -260,6 +222,46 @@ def add_order_to_sheet(order_data):
             return False
 
         logger.info(f"✅ Заказ {order_data['number']} добавлен в БД")
+
+        # 2. Затем пишем в Google Sheets (best-effort)
+        try:
+            current_sheet = get_sheet()
+            if current_sheet:
+                for _attempt in range(3):
+                    try:
+                        current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+                        current_sheet.append_row([
+                            order_data["number"],
+                            order_data["user_id"],
+                            order_data["username"],
+                            order_data.get("region", "KZ"),
+                            order_data["tariff"],
+                            order_data["rub"],
+                            "",
+                            current_date,
+                            ORDER_STATUSES["pending"]
+                        ])
+                        added_cell = current_sheet.find(order_data["number"])
+                        if added_cell:
+                            db.set_order_sheets_row(order_data["number"], added_cell.row)
+                        logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
+                        break
+                    except gspread.exceptions.APIError as e:
+                        if _attempt < 2:
+                            logger.warning(f"⚠️ gspread APIError (попытка {_attempt+1}/3): {e}")
+                            import time as _time
+                            _time.sleep(2 ** _attempt)
+                            _sheet_cache["sheet"] = None
+                            _sheet_cache["time"] = 0
+                            current_sheet = get_sheet()
+                        else:
+                            logger.error(f"❌ gspread APIError после 3 попыток: {e}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка добавления в Google Sheets: {e}")
+                        break
+        except Exception as e:
+            logger.warning(f"⚠️ Google Sheets недоступен, заказ сохранён только в БД: {e}")
+
         _run_stats_update()
         return True
 
