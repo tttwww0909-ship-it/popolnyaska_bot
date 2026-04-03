@@ -530,12 +530,12 @@ async def handle_admin_bonus(query, context):
 async def handle_bonus_uid_text(update, context):
     """Обработка ввода user_id для управления бонусами."""
     text = update.message.text.strip()
-    context.user_data.pop("admin_awaiting_bonus_uid", None)
     try:
         user_id = int(text)
     except ValueError:
-        await update.message.reply_text("❌ Некорректный ID. Введите числовой Telegram ID.")
+        await update.message.reply_text("❌ Некорректный ID. Введите числовой Telegram ID:")
         return True
+    context.user_data.pop("admin_awaiting_bonus_uid", None)
 
     bonus_info = await asyncio.to_thread(db.get_bonus_info, user_id)
     balance = bonus_info["balance"]
