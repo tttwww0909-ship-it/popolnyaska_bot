@@ -200,7 +200,7 @@ popolnyaska_bot/
 - [x] Периодическая очистка памяти (JobQueue, каждый час)
 - [x] Генерация ордера: SQLite единственный источник (UPDATE ... RETURNING)
 - [x] Админка: все чтения через SQLite
-- [x] 95 тестов (pytest): utils, database, referrals, bonus
+- [x] 100 тестов (pytest): utils, database, referrals, bonus
 
 ### ✅ Безопасность и надёжность
 - [x] Обработка ошибок API с fallback
