@@ -74,6 +74,47 @@ async def _get_user_orders_msg(telegram_id: int) -> tuple:
     return True, msg
 
 
+async def _proceed_vip_crypto(query, context, order_number: str, rub_final: int):
+    """Общий финал VIP крипто-оплаты: обновляет суммы, создаёт invoice, показывает экран оплаты."""
+    usdt_rate = await asyncio.to_thread(get_usdt_rate)
+    amount_usdt = round(rub_final / usdt_rate, 2) if usdt_rate else context.user_data.get("amount_usdt", 0)
+    context.user_data["amount_usdt"] = amount_usdt
+
+    if order_number in ORDER_INFO_MAP:
+        ORDER_INFO_MAP[order_number]["rub"] = rub_final
+        ORDER_INFO_MAP[order_number]["usdt"] = amount_usdt
+    await asyncio.to_thread(update_order_amount_in_sheet, order_number, rub_final)
+
+    pay_url = None
+    if _cryptopay and amount_usdt:
+        try:
+            invoice = await _cryptopay.create_invoice(amount_usdt, order_number, description=f"VIP заказ {order_number}")
+            pay_url = invoice.get("mini_app_invoice_url") or invoice.get("pay_url")
+            context.user_data["cryptopay_invoice_id"] = invoice.get("invoice_id")
+        except Exception as e:
+            logger.warning("CryptoPay invoice failed (VIP), fallback to manual: %s", e)
+
+    if pay_url:
+        await query.edit_message_text(
+            cryptopay_invoice_text(order_number, amount_usdt, amount_rub=rub_final, is_vip=True),
+            reply_markup=InlineKeyboardMarkup(crypto_payment_buttons(order_number, pay_url, is_vip=True)),
+            parse_mode="HTML"
+        )
+    else:
+        await query.edit_message_text(
+            crypto_payment_text(order_number, amount_usdt, amount_rub=rub_final, is_vip=True),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_vip_promo")]
+            ]),
+            parse_mode="HTML"
+        )
+    await asyncio.to_thread(update_payment_method, order_number, "Crypto (VIP)")
+    if order_number in ORDER_INFO_MAP:
+        ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto (VIP)'
+    logger.info(f"Клиент {query.from_user.id} — VIP крипто-оплата для {order_number}, сумма {rub_final}₽ ({amount_usdt} USDT)")
+
+
 async def _calc_referral_discount(user_id: int, rub: int, commission: float) -> dict:
     """Считает реферальную скидку для пользователя.
 
@@ -1077,44 +1118,75 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             # Применяем скидку 2% к сумме заказа
             rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
-            usdt_rate = await asyncio.to_thread(get_usdt_rate)
-            amount_usdt = round(rub_discounted / usdt_rate, 2) if usdt_rate else context.user_data.get("amount_usdt", 0)
-            context.user_data["amount_usdt"] = amount_usdt
-            # Обновляем сумму в ORDER_INFO_MAP, БД и Sheets со скидкой
-            if order_number in ORDER_INFO_MAP:
-                ORDER_INFO_MAP[order_number]["rub"] = rub_discounted
-                ORDER_INFO_MAP[order_number]["usdt"] = amount_usdt
-            await asyncio.to_thread(update_order_amount_in_sheet, order_number, rub_discounted)
+            context.user_data["rub_discounted"] = rub_discounted
 
-            # CryptoPay: создаём invoice если токен задан
-            pay_url = None
-            if _cryptopay and amount_usdt:
-                try:
-                    invoice = await _cryptopay.create_invoice(amount_usdt, order_number, description=f"VIP заказ {order_number}")
-                    pay_url = invoice.get("mini_app_invoice_url") or invoice.get("pay_url")
-                    context.user_data["cryptopay_invoice_id"] = invoice.get("invoice_id")
-                except Exception as e:
-                    logger.warning("CryptoPay invoice failed (VIP), fallback to manual: %s", e)
+            # Проверяем бонусные баллы
+            user_id = query.from_user.id
+            bonus_balance = await asyncio.to_thread(db.get_bonus_balance, user_id)
+            if bonus_balance > 0:
+                max_bonus = int(rub_discounted * MAX_BONUS_PAYMENT)
+                usable = min(int(bonus_balance), max_bonus)
+                if usable >= 1:
+                    usdt_rate = await asyncio.to_thread(get_usdt_rate)
+                    usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
+                    after_bonus = rub_discounted - usable
+                    usdt_after = f" (~{round(after_bonus / usdt_rate, 2)} USDT)" if usdt_rate else ""
+                    await query.edit_message_text(
+                        f"🎁 <b>У вас есть бонусные баллы!</b>\n\n"
+                        f"📦 Заказ: <b>{order_number}</b>\n"
+                        f"💎 Сумма со скидкой 2%: <b>{fmt(rub_discounted)} ₽</b>{usdt_suffix}\n"
+                        f"💰 Баланс баллов: <b>{fmt(int(bonus_balance))}</b>\n"
+                        f"📝 Можно списать: <b>{fmt(usable)} ₽</b>\n"
+                        f"✅ Итого после списания: <b>{fmt(after_bonus)} ₽</b>{usdt_after}\n\n"
+                        f"Списать баллы?",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton(f"🎁 Списать {fmt(usable)} баллов", callback_data=f"use_bonus_vip_{order_number}")],
+                            [InlineKeyboardButton("⏭️ Пропустить", callback_data=f"skip_bonus_vip_{order_number}")],
+                            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_vip_promo")],
+                        ]),
+                        parse_mode="HTML"
+                    )
+                    return
 
-            if pay_url:
-                await query.edit_message_text(
-                    cryptopay_invoice_text(order_number, amount_usdt, amount_rub=rub_discounted, is_vip=True),
-                    reply_markup=InlineKeyboardMarkup(crypto_payment_buttons(order_number, pay_url, is_vip=True)),
-                    parse_mode="HTML"
-                )
-            else:
-                await query.edit_message_text(
-                    crypto_payment_text(order_number, amount_usdt, amount_rub=rub_discounted, is_vip=True),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_crypto_{order_number}")],
-                        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_vip_promo")]
-                    ]),
-                    parse_mode="HTML"
-                )
-            await asyncio.to_thread(update_payment_method, order_number, "Crypto (VIP)")
+            # Нет баллов — сразу к оплате
+            await _proceed_vip_crypto(query, context, order_number, rub_discounted)
+
+        elif query.data.startswith("use_bonus_vip_"):
+            order_number = query.data.replace("use_bonus_vip_", "")
+            order = context.user_data.get("order")
+            if not order:
+                await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
+                return
+            user_id = query.from_user.id
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            bonus_balance = await asyncio.to_thread(db.get_bonus_balance, user_id)
+            max_bonus = int(rub_discounted * MAX_BONUS_PAYMENT)
+            usable = min(int(bonus_balance), max_bonus)
+            if usable < 1:
+                await query.answer("Недостаточно баллов для списания.", show_alert=True)
+                return
+            spent = await asyncio.to_thread(
+                db.spend_bonus, user_id, usable, order_number,
+                f"Оплата VIP-заказа {order_number}"
+            )
+            if not spent:
+                await query.answer("Ошибка списания баллов.", show_alert=True)
+                return
+            new_rub = rub_discounted - usable
+            context.user_data["rub_discounted"] = new_rub
             if order_number in ORDER_INFO_MAP:
-                ORDER_INFO_MAP[order_number]['payment_method'] = 'Crypto (VIP)'
-            logger.info(f"Клиент {query.from_user.id} выбрал VIP крипто-оплату для {order_number}")
+                ORDER_INFO_MAP[order_number]["bonus_used"] = usable
+            logger.info(f"Пользователь {user_id} списал {usable} баллов для VIP-заказа {order_number}")
+            await _proceed_vip_crypto(query, context, order_number, new_rub)
+
+        elif query.data.startswith("skip_bonus_vip_"):
+            order_number = query.data.replace("skip_bonus_vip_", "")
+            order = context.user_data.get("order")
+            if not order:
+                await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
+                return
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            await _proceed_vip_crypto(query, context, order_number, rub_discounted)
 
         elif query.data.startswith("pay_crypto_") and not query.data.startswith("pay_crypto_manual_"):
             order_number = query.data.replace("pay_crypto_", "")
