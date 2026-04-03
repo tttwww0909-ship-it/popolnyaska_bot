@@ -211,3 +211,36 @@ class TestCleanupMemory:
         USER_ORDER_TIMES[123] = [time.time() - 100000]
         cleanup_memory()
         assert 123 not in USER_ORDER_TIMES
+
+
+class TestGetReferralRates:
+    def test_exact_20(self):
+        from utils import get_referral_rates
+        partner, discount = get_referral_rates(1.20)
+        assert partner == 0.03
+        assert discount == 0.02
+
+    def test_exact_15(self):
+        from utils import get_referral_rates
+        partner, discount = get_referral_rates(1.15)
+        assert partner == 0.03
+        assert discount == 0.02
+
+    def test_exact_12(self):
+        from utils import get_referral_rates
+        partner, discount = get_referral_rates(1.12)
+        assert partner == 0.02
+        assert discount == 0.02
+
+    def test_exact_11(self):
+        from utils import get_referral_rates
+        partner, discount = get_referral_rates(1.11)
+        assert partner == 0.015
+        assert discount == 0.01
+
+    def test_unknown_commission_fallback(self):
+        from utils import get_referral_rates
+        # 1.18 not in table — should fall back to nearest ≤ (1.15)
+        partner, discount = get_referral_rates(1.18)
+        assert partner == 0.03
+        assert discount == 0.02

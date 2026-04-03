@@ -308,6 +308,28 @@ def generate_order():
         return db.generate_order_number()
 
 
+def get_referral_rates(commission: float) -> tuple:
+    """Возвращает (partner_pct, referral_discount_pct) для данной комиссии.
+
+    Ищет ближайший ключ в REFERRAL_RATES (сверху вниз).
+    Если комиссии нет в таблице — берём самый близкий (но не больший).
+    """
+    from config import REFERRAL_RATES
+    if commission in REFERRAL_RATES:
+        return REFERRAL_RATES[commission]
+    # Ищем ближайший ключ, не превышающий commission
+    best = None
+    for key in sorted(REFERRAL_RATES.keys(), reverse=True):
+        if key <= commission:
+            best = key
+            break
+    if best is not None:
+        return REFERRAL_RATES[best]
+    # fallback: минимальная ставка
+    min_key = min(REFERRAL_RATES.keys())
+    return REFERRAL_RATES[min_key]
+
+
 def cleanup_memory():
     """Очищает память от устаревших данных"""
     try:

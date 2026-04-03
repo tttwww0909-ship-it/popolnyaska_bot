@@ -111,6 +111,35 @@ class Database:
                     INSERT OR IGNORE INTO counters (name, value)
                     VALUES ('order_number', 1000)
                 ''')
+                # === РЕФЕРАЛЬНАЯ ПРОГРАММА ===
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS referrals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        referrer_id INTEGER NOT NULL,
+                        referred_id INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(referred_id)
+                    )
+                ''')
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS bonus_balance (
+                        user_id INTEGER PRIMARY KEY,
+                        balance REAL NOT NULL DEFAULT 0,
+                        total_earned REAL NOT NULL DEFAULT 0,
+                        total_spent REAL NOT NULL DEFAULT 0
+                    )
+                ''')
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS bonus_transactions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        amount REAL NOT NULL,
+                        tx_type TEXT NOT NULL,
+                        order_number TEXT,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
                 # Миграции для существующих БД
                 for migration in [
                     "ALTER TABLE reviews ADD COLUMN status TEXT DEFAULT 'pending'",
@@ -665,6 +694,169 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка генерации номера ордера: {e}")
             raise
+        finally:
+            conn.close()
+
+    # ── Реферальная программа ───────────────────────────────────
+
+    def add_referral(self, referrer_id: int, referred_id: int) -> bool:
+        """Сохраняет связку «кто пригласил – кого».
+        Возвращает False, если referred_id уже привязан к кому-то."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+                    (referrer_id, referred_id),
+                )
+                return conn.total_changes > 0
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления реферала: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_referrer(self, referred_id: int) -> Optional[int]:
+        """Возвращает telegram_id пригласившего или None."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT referrer_id FROM referrals WHERE referred_id = ?", (referred_id,))
+            row = c.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения реферера: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_referral_count(self, referrer_id: int) -> int:
+        """Количество приглашённых пользователем."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (referrer_id,))
+            return c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"❌ Ошибка подсчёта рефералов: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def get_bonus_balance(self, user_id: int) -> float:
+        """Текущий баланс бонусных баллов."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT balance FROM bonus_balance WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+            return row[0] if row else 0.0
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения баланса: {e}")
+            return 0.0
+        finally:
+            conn.close()
+
+    def get_bonus_info(self, user_id: int) -> Dict:
+        """Возвращает balance, total_earned, total_spent."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT balance, total_earned, total_spent FROM bonus_balance WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+            if row:
+                return {"balance": row[0], "total_earned": row[1], "total_spent": row[2]}
+            return {"balance": 0.0, "total_earned": 0.0, "total_spent": 0.0}
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения бонусной информации: {e}")
+            return {"balance": 0.0, "total_earned": 0.0, "total_spent": 0.0}
+        finally:
+            conn.close()
+
+    def add_bonus(self, user_id: int, amount: float, tx_type: str,
+                  order_number: str = None, description: str = None) -> bool:
+        """Начисляет бонус (amount > 0). Создаёт запись balance при необходимости."""
+        conn = self._connect()
+        try:
+            with conn:
+                c = conn.cursor()
+                c.execute(
+                    """INSERT INTO bonus_balance (user_id, balance, total_earned, total_spent)
+                       VALUES (?, ?, ?, 0)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                           balance = balance + excluded.balance,
+                           total_earned = total_earned + excluded.balance""",
+                    (user_id, amount, amount),
+                )
+                c.execute(
+                    "INSERT INTO bonus_transactions (user_id, amount, tx_type, order_number, description) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (user_id, amount, tx_type, order_number, description),
+                )
+                return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка начисления бонуса: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def spend_bonus(self, user_id: int, amount: float, order_number: str = None,
+                    description: str = None) -> bool:
+        """Списывает бонус. Проверяет достаточность баланса."""
+        conn = self._connect()
+        try:
+            with conn:
+                c = conn.cursor()
+                c.execute("SELECT balance FROM bonus_balance WHERE user_id = ?", (user_id,))
+                row = c.fetchone()
+                if not row or row[0] < amount:
+                    return False
+                c.execute(
+                    "UPDATE bonus_balance SET balance = balance - ?, total_spent = total_spent + ? WHERE user_id = ?",
+                    (amount, amount, user_id),
+                )
+                c.execute(
+                    "INSERT INTO bonus_transactions (user_id, amount, tx_type, order_number, description) "
+                    "VALUES (?, ?, 'payment', ?, ?)",
+                    (user_id, -amount, order_number, description),
+                )
+                return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка списания бонуса: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_bonus_history(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """Последние бонусные транзакции."""
+        conn = self._connect(row_factory=True)
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT * FROM bonus_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            )
+            return [dict(row) for row in c.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения истории бонусов: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def count_user_completed_orders(self, telegram_id: int) -> int:
+        """Количество выполненных заказов пользователя."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute('''
+                SELECT COUNT(*) FROM orders o
+                JOIN users u ON o.user_id = u.id
+                WHERE u.telegram_id = ? AND o.status = ?
+            ''', (telegram_id, ORDER_STATUSES["completed"]))
+            return c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"❌ Ошибка подсчёта заказов: {e}")
+            return 0
         finally:
             conn.close()
 

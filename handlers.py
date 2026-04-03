@@ -15,10 +15,11 @@ from config import (
     ORDER_STATUSES, FAQ_KEYBOARD, YOOMONEY_WALLET, OZON_PAY_URL,
     CRYPTOPAY_TOKEN, REVIEWS_CHAT_ID,
     GIFT_CARD_LABELS, REGION_DESCRIPTIONS, GIFT_CARD_HINTS,
+    REF_THRESHOLD, FIXED_PARTNER_BONUS, MAX_BONUS_PAYMENT, REFERRAL_RATES,
 )
 from utils import (
     fmt, esc, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, smart_round, check_spam, mark_order_created, generate_order,
-    cleanup_memory, validate_email, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
+    cleanup_memory, validate_email, get_referral_rates, ORDER_USER_MAP, ORDER_INFO_MAP, ORDER_LOCK,
     AWAITING_SCREENSHOT, AWAITING_EMAIL, AWAITING_CODE, AWAITING_REVIEW_COMMENT,
 )
 from keyboards import (
@@ -73,6 +74,94 @@ async def _get_user_orders_msg(telegram_id: int) -> tuple:
     return True, msg
 
 
+async def _calc_referral_discount(user_id: int, rub: int, commission: float) -> dict:
+    """Считает реферальную скидку для пользователя.
+
+    Возвращает dict:
+      - is_referred: bool
+      - discount_pct: float (0.02 = 2%)
+      - discount_rub: int (абсолютная скидка)
+      - rub_discounted: int (итого после скидки)
+      - partner_pct: float
+    """
+    referrer_id = await asyncio.to_thread(db.get_referrer, user_id)
+    if not referrer_id:
+        return {"is_referred": False, "discount_pct": 0, "discount_rub": 0,
+                "rub_discounted": rub, "partner_pct": 0}
+    # Скидка только на первый заказ
+    completed = await asyncio.to_thread(db.count_user_completed_orders, user_id)
+    if completed > 0:
+        # Уже покупал — скидки нет, но партнёр всё ещё получает бонус
+        partner_pct, _ = get_referral_rates(commission)
+        return {"is_referred": True, "discount_pct": 0, "discount_rub": 0,
+                "rub_discounted": rub, "partner_pct": partner_pct}
+    partner_pct, discount_pct = get_referral_rates(commission)
+    discount_rub = int(rub * discount_pct)
+    rub_discounted = rub - discount_rub
+    return {
+        "is_referred": True,
+        "discount_pct": discount_pct,
+        "discount_rub": discount_rub,
+        "rub_discounted": rub_discounted,
+        "partner_pct": partner_pct,
+    }
+
+
+async def _credit_partner_bonus(bot, order_number: str, buyer_id: int):
+    """Начисляет бонус партнёру после завершения заказа. Отправляет уведомление."""
+    referrer_id = await asyncio.to_thread(db.get_referrer, buyer_id)
+    if not referrer_id:
+        return
+
+    order_info = ORDER_INFO_MAP.get(order_number)
+    if not order_info:
+        # Пробуем из БД
+        order_db = await asyncio.to_thread(db.get_order, order_number)
+        if not order_db:
+            return
+        amount_rub = order_db.get("amount_rub", 0)
+        partner_pct = 0.02  # fallback
+    else:
+        # Считаем бонус от суммы без учёта списанных баллов
+        bonus_used = order_info.get("bonus_used", 0)
+        amount_rub = order_info.get("rub", 0) + bonus_used  # «реальные деньги» = rub (после списания)
+        # Но партнёр получает % только от «живых» денег (без баллов)
+        amount_rub = order_info.get("rub", 0)
+        partner_pct = order_info.get("partner_pct", 0)
+
+    if partner_pct <= 0:
+        # Получаем ставку по комиссии
+        commission = order_info.get("commission", 1.15) if order_info else 1.15
+        partner_pct, _ = get_referral_rates(commission)
+
+    if amount_rub >= REF_THRESHOLD:
+        bonus = round(amount_rub * partner_pct, 2)
+    else:
+        bonus = FIXED_PARTNER_BONUS
+
+    if bonus <= 0:
+        return
+
+    ok = await asyncio.to_thread(
+        db.add_bonus, referrer_id, bonus, "referral_bonus",
+        order_number, f"Бонус за покупку друга ({order_number})"
+    )
+    if ok:
+        new_balance = await asyncio.to_thread(db.get_bonus_balance, referrer_id)
+        try:
+            await bot.send_message(
+                referrer_id,
+                f"🎉 <b>Твой друг совершил покупку!</b>\n\n"
+                f"Начислено: <b>+{fmt(int(bonus))} баллов</b>\n"
+                f"Баланс: <b>{fmt(int(new_balance))} баллов</b>\n\n"
+                f"<i>1 балл = 1 ₽ • Баллами можно оплатить до 50% заказа</i>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления партнёру {referrer_id}: {e}")
+        logger.info(f"Партнёру {referrer_id} начислено {bonus} баллов за заказ {order_number}")
+
+
 REVIEW_GROUP_MSG = "🔗 https://t.me/popolnyaskachat\nЗдесь вы можете найти свой отзыв после прохождения модерации."
 
 SYSTEM_REVIEW_COMMENTS = {
@@ -113,12 +202,29 @@ async def send_review_for_moderation(bot, review_id: int, user_id: int, username
 # ═══════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню"""
+    """Главное меню + обработка реферальной ссылки"""
     try:
+        user = update.message.from_user
+        # Регистрируем/обновляем пользователя
+        await asyncio.to_thread(db.add_user, user.id, user.username, user.first_name)
+
+        # Deep link: /start ref_<telegram_id>
+        if context.args:
+            arg = context.args[0]
+            if arg.startswith("ref_"):
+                try:
+                    referrer_id = int(arg[4:])
+                    if referrer_id != user.id:
+                        saved = await asyncio.to_thread(db.add_referral, referrer_id, user.id)
+                        if saved:
+                            logger.info(f"Реферал: {user.id} приглашён пользователем {referrer_id}")
+                except (ValueError, TypeError):
+                    pass
+
         reply_keyboard = ReplyKeyboardMarkup(
             [
                 [KeyboardButton("🍏 Пополнить Apple ID")],
-                [KeyboardButton("📋 Заказы"), KeyboardButton("❓ FAQ")],
+                [KeyboardButton("👤 Личный кабинет"), KeyboardButton("❓ FAQ")],
             ],
             resize_keyboard=True
         )
@@ -126,7 +232,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я готов помогать 🙂",
             reply_markup=reply_keyboard
         )
-        logger.info(f"Пользователь {update.message.from_user.id} запустил бот")
+        logger.info(f"Пользователь {user.id} запустил бот")
     except Exception as e:
         logger.error(f"Ошибка в start: {e}")
         await update.message.reply_text("❌ Ошибка. Попробуйте позже.")
@@ -201,19 +307,108 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
-                    [InlineKeyboardButton("🔗 Все отзывы", url="https://t.me/popolnyaskachat")],
-                    [InlineKeyboardButton("⬅️ В главное меню", callback_data="back_to_start")]
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="cabinet")],
                 ])
             )
             logger.info(f"Пользователь {user_id} просмотрел заказы")
+            return
+
+        # === ЛИЧНЫЙ КАБИНЕТ (inline) ===
+        if query.data == "cabinet":
+            keyboard = [
+                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
+                [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
+                [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")],
+                [InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")],
+            ]
+            await _safe_edit(
+                query,
+                "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
+            )
+            return
+
+        # === РЕФЕРАЛЬНАЯ ПРОГРАММА ===
+        if query.data == "ref_program":
+            user_id = query.from_user.id
+            ref_count = await asyncio.to_thread(db.get_referral_count, user_id)
+            bonus_info = await asyncio.to_thread(db.get_bonus_info, user_id)
+            balance = bonus_info["balance"]
+            total_earned = bonus_info["total_earned"]
+
+            bot_me = await context.bot.get_me()
+            ref_link = f"https://t.me/{bot_me.username}?start=ref_{user_id}"
+
+            text = (
+                f"🤝 <b>Реферальная программа</b>\n\n"
+                f"Приглашайте друзей и получайте бонусные баллы "
+                f"с каждой их покупки!\n\n"
+                f"📎 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>\n\n"
+                f"👥 Приглашено друзей: <b>{ref_count}</b>\n"
+                f"💰 Баланс баллов: <b>{fmt(int(balance))} ₽</b>\n"
+                f"📊 Всего заработано: <b>{fmt(int(total_earned))} ₽</b>\n\n"
+                f"<b>Как это работает:</b>\n"
+                f"1️⃣ Отправьте ссылку другу\n"
+                f"2️⃣ Друг получает скидку на первый заказ\n"
+                f"3️⃣ Вы получаете бонусные баллы с его покупки\n"
+                f"4️⃣ Баллами можно оплатить до 50% заказа\n\n"
+                f"<i>1 балл = 1 ₽</i>"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📊 История бонусов", callback_data="bonus_history")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="cabinet")],
+            ]
+            await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            return
+
+        # === АКЦИИ И БОНУСЫ ===
+        if query.data == "bonuses":
+            user_id = query.from_user.id
+            bonus_info = await asyncio.to_thread(db.get_bonus_info, user_id)
+            balance = bonus_info["balance"]
+
+            text = (
+                f"🎁 <b>Акции и бонусы</b>\n\n"
+                f"💰 Ваш баланс: <b>{fmt(int(balance))} баллов</b>\n\n"
+                f"<b>Как потратить баллы:</b>\n"
+                f"При оформлении заказа вам будет предложено "
+                f"списать баллы (до 50% от стоимости).\n\n"
+                f"<b>Как заработать:</b>\n"
+                f"🤝 Пригласите друга — вы получите баллы с его покупок\n"
+                f"💎 Крупные заказы = больше бонусов партнёру"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📊 История бонусов", callback_data="bonus_history")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="cabinet")],
+            ]
+            await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            return
+
+        # === ИСТОРИЯ БОНУСОВ ===
+        if query.data == "bonus_history":
+            user_id = query.from_user.id
+            history = await asyncio.to_thread(db.get_bonus_history, user_id, 10)
+            if not history:
+                text = "📊 <b>История бонусов</b>\n\nУ вас пока нет бонусных операций."
+            else:
+                text = "📊 <b>История бонусов</b>\n\n"
+                for tx in history:
+                    sign = "+" if tx["amount"] > 0 else ""
+                    date = str(tx.get("created_at", ""))[:16]
+                    desc = tx.get("description") or tx.get("tx_type", "")
+                    text += f"{'🟢' if tx['amount'] > 0 else '🔴'} {sign}{fmt(int(tx['amount']))} ₽ — {esc(desc)}\n   {esc(date)}\n\n"
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Назад", callback_data="ref_program")],
+            ]
+            await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
             return
 
         # === НАЗАД В ГЛАВНОЕ МЕНЮ ===
         if query.data in ("back_to_start", "new_order"):
             keyboard = [
                 [InlineKeyboardButton("🍏 Пополнить Apple ID", callback_data="apple_topup")],
-                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
+                [InlineKeyboardButton("� Личный кабинет", callback_data="cabinet")],
                 [InlineKeyboardButton("❓ FAQ", callback_data="faq_menu")],
             ]
             await query.edit_message_text(
@@ -503,14 +698,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             region_name = REGION_DISPLAY[region_code]
             tariff_name = f"{fmt(t_amount)} {t_currency}"
+
+            # Реферальная скидка
+            ref_info = await _calc_referral_discount(user.id, rub, commission)
+            rub_final = ref_info["rub_discounted"]
+
             context.user_data["order"] = {
                 "number": order_number,
                 "service": f"Gift Card ({region_name})",
                 "tariff": tariff_name,
                 "kzt": 0,
-                "rub": rub,
+                "rub": rub_final,
+                "rub_original": rub,
                 "region": region_code,
-                "user": user
+                "user": user,
+                "commission": commission,
+                "ref_discount": ref_info["discount_rub"],
+                "partner_pct": ref_info["partner_pct"],
             }
             keyboard = [
                 [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
@@ -519,12 +723,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _hints_r = GIFT_CARD_HINTS.get(region_code, {})
             hint = _hints_r.get(t_amount) or _hints_r.get("_default")
             hint_line = f"\n\n💡 <i>Этого номинала хватит на: {hint}.</i>" if hint else ""
+
+            if ref_info["discount_rub"] > 0:
+                price_line = (
+                    f"Сумма к оплате: <s>{fmt(rub)} ₽</s> → <b>{fmt(rub_final)} ₽</b> "
+                    f"(скидка {round(ref_info['discount_pct'] * 100)}% по реф. ссылке)"
+                )
+            else:
+                price_line = f"Сумма к оплате: <b>{fmt(rub_final)} ₽</b> (комиссия {commission_pct}%)"
+
             await query.edit_message_text(
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
                 f"Регион: <b>{region_name}</b>\n"
                 f"Тариф: <b>{tariff_name} Gift Card</b>\n"
-                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (комиссия {commission_pct}%)"
+                f"{price_line}"
                 f"{hint_line}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
@@ -562,14 +775,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             tariff_name = f"{fmt(amount)} KZT"
+
+            # Реферальная скидка
+            ref_info = await _calc_referral_discount(user.id, rub, commission)
+            rub_final = ref_info["rub_discounted"]
+
             context.user_data["order"] = {
                 "number": order_number,
                 "service": "Apple ID",
                 "tariff": tariff_name,
                 "kzt": amount,
-                "rub": rub,
+                "rub": rub_final,
+                "rub_original": rub,
                 "region": "KZ",
-                "user": user
+                "user": user,
+                "commission": commission,
+                "ref_discount": ref_info["discount_rub"],
+                "partner_pct": ref_info["partner_pct"],
             }
             keyboard = [
                 [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
@@ -577,11 +799,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             kz_hint = GIFT_CARD_HINTS.get("KZ", {}).get(amount)
             hint_line = f"\n\n💡 <i>Этого номинала хватит на: {kz_hint}.</i>" if kz_hint else ""
+
+            if ref_info["discount_rub"] > 0:
+                price_line = (
+                    f"Сумма к оплате: <s>{fmt(rub)} ₽</s> → <b>{fmt(rub_final)} ₽</b> "
+                    f"(скидка {round(ref_info['discount_pct'] * 100)}% по реф. ссылке)"
+                )
+            else:
+                price_line = f"Сумма к оплате: <b>{fmt(rub_final)} ₽</b> (сервисный сбор {commission_pct}%)"
+
             await query.edit_message_text(
                 f"📦 Информация о заказе\n\n"
                 f"Номер заказа: <b>{order_number}</b>\n"
                 f"Тариф: <b>{tariff_name}</b>\n"
-                f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (сервисный сбор {commission_pct}%)"
+                f"{price_line}"
                 f"{hint_line}",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
@@ -642,7 +873,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "kzt": order["kzt"],
                     "rub": order["rub"],
                     "usdt": amount_usdt or 0,
-                    "region": order.get("region", "KZ")
+                    "region": order.get("region", "KZ"),
+                    "commission": order.get("commission", 0),
+                    "partner_pct": order.get("partner_pct", 0),
+                    "ref_discount": order.get("ref_discount", 0),
+                    "rub_original": order.get("rub_original", order["rub"]),
+                    "bonus_used": 0,
                 }
                 context.user_data["current_order_number"] = order_number
 
@@ -661,12 +897,25 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"Заказ {order_number} — промо VIP-экран (>{8500}₽)")
                 else:
                     pay_btns = payment_buttons(order_number, is_large_order=False)
+                    # Предложение списания баллов
+                    bonus_balance = await asyncio.to_thread(db.get_bonus_balance, user_id)
+                    bonus_line = ""
+                    if bonus_balance > 0:
+                        max_bonus = int(order["rub"] * MAX_BONUS_PAYMENT)
+                        usable = min(int(bonus_balance), max_bonus)
+                        if usable >= 1:
+                            pay_btns.insert(0, [InlineKeyboardButton(
+                                f"🎁 Списать {fmt(usable)} баллов",
+                                callback_data=f"use_bonus_{order_number}"
+                            )])
+                            bonus_line = f"\n💰 Доступно баллов: {fmt(int(bonus_balance))} (можно списать до {fmt(usable)} ₽)\n"
                     usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
                     await query.edit_message_text(
                         f"✅ Заявка сформирована!\n\n"
                         f"Номер заказа: <b>{order['number']}</b>\n"
                         f"Тариф: <b>{order['tariff']}</b>\n"
-                        f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n\n"
+                        f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n"
+                        f"{bonus_line}\n"
                         f"Выберите способ оплаты:",
                         reply_markup=InlineKeyboardMarkup(pay_btns),
                         parse_mode="HTML"
@@ -674,6 +923,56 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"Заказ {order_number} — выбор способа оплаты")
             finally:
                 ORDER_LOCK.pop(order_number, None)
+
+        # === СПИСАНИЕ БАЛЛОВ ===
+        elif query.data.startswith("use_bonus_"):
+            order_number = query.data.replace("use_bonus_", "")
+            order = context.user_data.get("order")
+            if not order:
+                await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
+                return
+            user_id = query.from_user.id
+            bonus_balance = await asyncio.to_thread(db.get_bonus_balance, user_id)
+            max_bonus = int(order["rub"] * MAX_BONUS_PAYMENT)
+            usable = min(int(bonus_balance), max_bonus)
+            if usable < 1:
+                await query.answer("Недостаточно баллов для списания.", show_alert=True)
+                return
+
+            # Списываем баллы
+            spent = await asyncio.to_thread(
+                db.spend_bonus, user_id, usable, order_number,
+                f"Оплата заказа {order_number}"
+            )
+            if not spent:
+                await query.answer("Ошибка списания баллов. Попробуйте снова.", show_alert=True)
+                return
+
+            new_rub = order["rub"] - usable
+            order["rub"] = new_rub
+            context.user_data["order"] = order
+            if order_number in ORDER_INFO_MAP:
+                ORDER_INFO_MAP[order_number]["rub"] = new_rub
+                ORDER_INFO_MAP[order_number]["bonus_used"] = usable
+            # Обновляем сумму в Sheets и БД
+            await asyncio.to_thread(update_order_amount_in_sheet, order_number, new_rub)
+
+            usdt_rate = await asyncio.to_thread(get_usdt_rate)
+            amount_usdt = round(new_rub / usdt_rate, 2) if usdt_rate else None
+            context.user_data["amount_usdt"] = amount_usdt
+
+            pay_btns = payment_buttons(order_number, is_large_order=(new_rub > 8500))
+            usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
+            await query.edit_message_text(
+                f"✅ Списано <b>{fmt(usable)}</b> баллов!\n\n"
+                f"Номер заказа: <b>{order['number']}</b>\n"
+                f"Тариф: <b>{order['tariff']}</b>\n"
+                f"Сумма: <b>{fmt(new_rub)} ₽</b>{usdt_suffix}\n\n"
+                f"Выберите способ оплаты:",
+                reply_markup=InlineKeyboardMarkup(pay_btns),
+                parse_mode="HTML"
+            )
+            logger.info(f"Пользователь {user_id} списал {usable} баллов для заказа {order_number}")
 
         # === ОПЛАТА ЮMONEY ===
         elif query.data.startswith("pay_yoomoney_"):
@@ -1242,6 +1541,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode="HTML",
                                 reply_markup=InlineKeyboardMarkup(rating_keyboard(order_num))
                             )
+                            # Начисляем бонус партнёру
+                            await _credit_partner_bonus(context.bot, order_num, user_id)
                         else:
                             await context.bot.send_message(
                                 user_id,
@@ -1335,6 +1636,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     logger.error(f"Ошибка уведомления клиента о пополнении: {e}")
+                # Начисляем бонус партнёру
+                await _credit_partner_bonus(context.bot, order_num, client_id)
 
             await query.edit_message_text(
                 f"✅ Заказ <b>{order_num}</b> выполнен!\n\nКлиент уведомлён о пополнении.",
@@ -1507,7 +1810,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔗 Все отзывы", url="https://t.me/popolnyaskachat")],
-                    [InlineKeyboardButton("⬅️ Назад", callback_data="my_orders")]
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="cabinet")]
                 ])
             )
 
@@ -1661,6 +1964,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as exc:
                     logger.error(f"Ошибка отправки запроса отзыва: {exc}")
+                # Начисляем бонус партнёру
+                await _credit_partner_bonus(context.bot, code_order, code_client)
             except Exception as e:
                 logger.error(f"Ошибка отправки кода клиенту: {e}")
                 await update.message.reply_text(f"❌ Не удалось отправить код клиенту. Ошибка: {esc(str(e))}")
@@ -1771,17 +2076,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if text == "📋 Заказы":
-            ok, msg = await _get_user_orders_msg(user_id)
+        if text == "📋 Заказы" or text == "👤 Личный кабинет":
+            keyboard = [
+                [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
+                [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
+                [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")],
+                [InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")],
+            ]
             await update.message.reply_text(
-                msg,
+                "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
-                    [InlineKeyboardButton("🔗 Все отзывы", url="https://t.me/popolnyaskachat")],
-                ])
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
-            logger.info(f"Пользователь {user_id} просмотрел заказы")
             return
 
         # === ВВОД КАСТОМНОЙ СУММЫ ===
@@ -1816,24 +2122,41 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user = update.message.from_user
                 tariff_name = f"{fmt(amount)} KZT"
 
+                # Реферальная скидка
+                ref_info = await _calc_referral_discount(user.id, rub, commission)
+                rub_final = ref_info["rub_discounted"]
+
                 context.user_data["order"] = {
                     "number": order_number,
                     "service": "Apple ID",
                     "tariff": tariff_name,
                     "kzt": amount,
-                    "rub": rub,
+                    "rub": rub_final,
+                    "rub_original": rub,
                     "region": "KZ",
-                    "user": user
+                    "user": user,
+                    "commission": commission,
+                    "ref_discount": ref_info["discount_rub"],
+                    "partner_pct": ref_info["partner_pct"],
                 }
                 keyboard = [
                     [InlineKeyboardButton("✅ Продолжить", callback_data=f"confirm_{order_number}")],
                     [InlineKeyboardButton("❌ Отмена", callback_data="region_KZ")]
                 ]
+
+                if ref_info["discount_rub"] > 0:
+                    price_line = (
+                        f"Сумма к оплате: <s>{fmt(rub)} ₽</s> → <b>{fmt(rub_final)} ₽</b> "
+                        f"(скидка {round(ref_info['discount_pct'] * 100)}% по реф. ссылке)"
+                    )
+                else:
+                    price_line = f"Сумма к оплате: <b>{fmt(rub_final)} ₽</b> (сервисный сбор {commission_pct}%)"
+
                 await update.message.reply_text(
                     f"📦 Информация о заказе\n\n"
                     f"Номер заказа: <b>{order_number}</b>\n"
                     f"Тариф: <b>{tariff_name}</b>\n"
-                    f"Сумма к оплате: <b>{fmt(rub)} ₽</b> (сервисный сбор {commission_pct}%)",
+                    f"{price_line}",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )

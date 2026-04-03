@@ -222,3 +222,107 @@ class TestPendingStates:
     def test_log_action(self, db):
         ok = db.log_action(123, "test_action", "details")
         assert ok is True
+
+
+class TestReferrals:
+    def test_add_referral(self, db):
+        db.add_user(100, "partner", "Partner")
+        db.add_user(200, "friend", "Friend")
+        assert db.add_referral(100, 200) is True
+
+    def test_add_referral_duplicate(self, db):
+        db.add_user(100, "partner", "Partner")
+        db.add_user(200, "friend", "Friend")
+        db.add_referral(100, 200)
+        # Повторная привязка того же referred_id — ignored
+        assert db.add_referral(999, 200) is False
+
+    def test_get_referrer(self, db):
+        db.add_user(100, "p", "P")
+        db.add_user(200, "f", "F")
+        db.add_referral(100, 200)
+        assert db.get_referrer(200) == 100
+
+    def test_get_referrer_not_found(self, db):
+        assert db.get_referrer(999) is None
+
+    def test_get_referral_count(self, db):
+        db.add_user(100, "p", "P")
+        db.add_user(201, "f1", "F1")
+        db.add_user(202, "f2", "F2")
+        db.add_referral(100, 201)
+        db.add_referral(100, 202)
+        assert db.get_referral_count(100) == 2
+
+    def test_get_referral_count_empty(self, db):
+        assert db.get_referral_count(999) == 0
+
+
+class TestBonusBalance:
+    def test_add_bonus(self, db):
+        db.add_user(100, "p", "P")
+        ok = db.add_bonus(100, 50.0, "referral_bonus", "ORD-1001", "Тестовый бонус")
+        assert ok is True
+        assert db.get_bonus_balance(100) == 50.0
+
+    def test_add_bonus_accumulates(self, db):
+        db.add_user(100, "p", "P")
+        db.add_bonus(100, 30.0, "referral_bonus")
+        db.add_bonus(100, 20.0, "referral_bonus")
+        assert db.get_bonus_balance(100) == 50.0
+        info = db.get_bonus_info(100)
+        assert info["total_earned"] == 50.0
+        assert info["total_spent"] == 0.0
+
+    def test_spend_bonus(self, db):
+        db.add_user(100, "p", "P")
+        db.add_bonus(100, 100.0, "referral_bonus")
+        ok = db.spend_bonus(100, 40.0, "ORD-1001", "Оплата")
+        assert ok is True
+        assert db.get_bonus_balance(100) == 60.0
+        info = db.get_bonus_info(100)
+        assert info["total_spent"] == 40.0
+
+    def test_spend_bonus_insufficient(self, db):
+        db.add_user(100, "p", "P")
+        db.add_bonus(100, 10.0, "referral_bonus")
+        ok = db.spend_bonus(100, 50.0, "ORD-1001")
+        assert ok is False
+        assert db.get_bonus_balance(100) == 10.0
+
+    def test_spend_bonus_no_record(self, db):
+        ok = db.spend_bonus(999, 10.0)
+        assert ok is False
+
+    def test_get_bonus_balance_no_record(self, db):
+        assert db.get_bonus_balance(999) == 0.0
+
+    def test_get_bonus_info_no_record(self, db):
+        info = db.get_bonus_info(999)
+        assert info["balance"] == 0.0
+        assert info["total_earned"] == 0.0
+
+    def test_bonus_history(self, db):
+        db.add_user(100, "p", "P")
+        db.add_bonus(100, 30.0, "referral_bonus", "ORD-1001", "Бонус 1")
+        db.add_bonus(100, 20.0, "referral_bonus", "ORD-1002", "Бонус 2")
+        db.spend_bonus(100, 10.0, "ORD-1003", "Оплата")
+        history = db.get_bonus_history(100, limit=10)
+        assert len(history) == 3
+        # Проверяем, что все типы транзакций присутствуют
+        types = [h["tx_type"] for h in history]
+        assert "referral_bonus" in types
+        assert "payment" in types
+        amounts = sorted([h["amount"] for h in history])
+        assert amounts == [-10.0, 20.0, 30.0]
+
+    def test_bonus_history_empty(self, db):
+        assert db.get_bonus_history(999) == []
+
+    def test_count_user_completed_orders(self, db):
+        uid = db.add_user(100, "u", "U")
+        db.add_order("ORD-1001", uid, "Apple ID", "5000 KZT", 5000, 1000)
+        db.update_order_status("ORD-1001", "Выполнен")
+        db.add_order("ORD-1002", uid, "Apple ID", "10000 KZT", 10000, 2000)
+        db.update_order_status("ORD-1002", "Ожидает оплаты")
+        assert db.count_user_completed_orders(100) == 1
