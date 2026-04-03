@@ -24,7 +24,9 @@ def admin_panel_keyboard():
     return [
         [InlineKeyboardButton("📊 Общая статистика", callback_data="stats_general")],
         [InlineKeyboardButton("📦 Последние заказы", callback_data="admin_orders")],
-        [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")]
+        [InlineKeyboardButton("🔄 Изменить статус заказа", callback_data="admin_manage_orders")],
+        [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("💰 Управление бонусами", callback_data="admin_bonus")],
     ]
 
 

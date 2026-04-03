@@ -18,8 +18,17 @@ popolnyaska_bot/
 ├── bot.py              — точка входа, запуск polling
 ├── config.py           — .env, константы, логирование, тарифы, описания регионов, FAQ, реферальные ставки
 ├── utils.py            — TimedDict, PersistentTimedDict, валидация email, антиспам, курсы (с кэшем), комиссии, генерация ордера, get_referral_rates
-├── handlers.py         — все Telegram-хендлеры (команды, кнопки, VIP-промо, админка, отзывы, реферальная система, бонусы)
-├── keyboards.py        — клавиатуры (rating, payment, crypto, VIP promo, region selection)
+├── handlers/           — пакет обработчиков Telegram
+│   ├── __init__.py     — диспетчер кнопок (buttons) и текста (text_handler), реэкспорт для bot.py
+│   ├── common.py       — общие хелперы (_safe_edit, _get_order_data, etc.), /start, error_handler, периодические задачи
+│   ├── order.py        — создание заказа: регион, тариф, подтверждение, кастомная сумма, бонусы, ввод email
+│   ├── payment.py      — способы оплаты: ЮMoney, OZON, крипта, VIP-промо, скриншоты, фото-хендлер
+│   ├── admin.py        — админ-панель: статусы, отправка кода, NEW рассылка, NEW управление бонусами
+│   ├── review.py       — отзывы: оценка, комментарии, модерация, публикация
+│   ├── cabinet.py      — личный кабинет: заказы, отзывы, реферальная программа, бонусы, reply-клавиатура
+│   ├── faq.py          — FAQ (8 пунктов)
+│   └── crypto_webhook.py — CryptoPay webhook обработчик
+├── keyboards.py        — клавиатуры (rating, payment, crypto, VIP promo, region selection, admin panel)
 ├── sheets.py           — Google Sheets: запись заказов, обновление статистики (lazy init)
 ├── database.py         — SQLite CRUD, миграции, реферальные таблицы, бонусы
 ├── cryptopay.py        — CryptoPay (@CryptoBot) автоматический приём крипто-платежей
@@ -155,6 +164,8 @@ popolnyaska_bot/
 - [x] KZ: при подтверждении оплаты — запрос почты Apple ID
 - [x] Gift Card: кнопка "📤 Отправить код клиенту" → автостатус "Выполнен"
 - [x] Кнопка "Пополнение произведено" → статус "Выполнен" (для KZ)
+- [x] Рассылка клиентам (📢) — отправка HTML-сообщения всем пользователям с rate-limiting
+- [x] Управление бонусами (💰) — просмотр, начисление и списание баллов пользователей
 
 ### ✅ Отзывы
 - [x] После выполнения заказа — предложение оценить (1–5 ⭐)
@@ -174,7 +185,8 @@ popolnyaska_bot/
 - [x] Безопасно ли это
 
 ### ✅ Технические оптимизации
-- [x] Модульная архитектура (bot.py → config / utils / handlers / keyboards / sheets / database / cryptopay)
+- [x] Модульная архитектура: handlers/ пакет (9 файлов вместо монолита 2 500+ строк)
+- [x] Диспетчерский __init__.py: точные маршруты (dict) + префиксные маршруты (if/elif)
 - [x] Кэширование Google Sheets (get_sheet() с TTL 5 мин)
 - [x] Кэширование sheets_row в SQLite
 - [x] Кэширование курсов валют (TTL, fallback)
@@ -205,9 +217,6 @@ popolnyaska_bot/
 - [x] smart_round (ceil до 50/90)
 
 ## Возможные улучшения (не реализовано)
-- [ ] Разбить handlers.py на подмодули (admin, order, payment, review)
 - [ ] Добавить больше сервисов (не только Apple ID)
 - [ ] Автоматическая проверка оплаты (ЮMoney API)
-- [ ] Рассылка клиентам
 - [ ] Бэкап Google Sheets
-- [ ] Админ-команда для управления бонусами пользователей

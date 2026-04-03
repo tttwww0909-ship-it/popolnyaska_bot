@@ -196,6 +196,22 @@ class Database:
         finally:
             conn.close()
 
+    # Алиас для обратной совместимости
+    get_user_by_telegram_id = get_user
+
+    def get_all_user_ids(self) -> list[int]:
+        """Возвращает список telegram_id всех пользователей."""
+        conn = self._connect()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT telegram_id FROM users")
+            return [row[0] for row in c.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+            return []
+        finally:
+            conn.close()
+
     def add_order(self, order_number: str, user_id: int, service: str, tariff: str,
                   amount_kzt: int, amount_rub: int, payment_id: str = None) -> Optional[int]:
         """Добавляет новый заказ в БД"""
