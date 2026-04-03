@@ -102,7 +102,8 @@ def vip_promo_keyboard(order_number: str):
     """Клавиатура VIP-промо"""
     return [
         [InlineKeyboardButton("💎 Оплатить криптой (−2%)", callback_data=f"vip_crypto_{order_number}")],
-        [InlineKeyboardButton(" Связаться с оператором", url="https://t.me/popolnyaska_halper")],
+        [InlineKeyboardButton("📞 Связаться с оператором", url="https://t.me/popolnyaska_halper")],
+        [InlineKeyboardButton("❌ Отказаться от заказа", callback_data=f"vip_decline_{order_number}")],
     ]
 
 

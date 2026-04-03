@@ -1046,6 +1046,28 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ORDER_INFO_MAP[order_number]['payment_method'] = 'OZON банк'
             logger.info(f"Клиент {query.from_user.id} выбрал OZON банк для {order_number}")
 
+        # === ОТКАЗ ОТ VIP-ЗАКАЗА ===
+        elif query.data.startswith("vip_decline_"):
+            order_number = query.data.replace("vip_decline_", "")
+            await asyncio.to_thread(update_order_status, order_number, ORDER_STATUSES["cancelled"])
+            context.user_data.pop("vip_order_number", None)
+            context.user_data.pop("rub_discounted", None)
+            context.user_data.pop("order", None)
+            context.user_data.pop("current_order_number", None)
+            if order_number in ORDER_INFO_MAP:
+                del ORDER_INFO_MAP[order_number]
+            await query.edit_message_text(
+                f"❌ Заказ <b>{order_number}</b> отменён.\n\n"
+                f"Вы всегда можете создать новый заказ. Если есть вопросы — "
+                f"напишите в поддержку.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍏 Новый заказ", callback_data="apple_topup")],
+                    [InlineKeyboardButton("📞 Написать в поддержку", url="https://t.me/popolnyaska_halper")],
+                ])
+            )
+            logger.info(f"Клиент {query.from_user.id} отказался от VIP-заказа {order_number}")
+
         # === ОПЛАТА КРИПТОЙ ===
         elif query.data.startswith("vip_crypto_"):
             order_number = query.data.replace("vip_crypto_", "")
