@@ -315,12 +315,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === ЛИЧНЫЙ КАБИНЕТ (inline) ===
         if query.data == "cabinet":
+            user_id = query.from_user.id
+            completed = await asyncio.to_thread(db.count_user_completed_orders, user_id)
             keyboard = [
                 [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
                 [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
-                [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")],
-                [InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")],
             ]
+            if completed >= 1:
+                keyboard.append([InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")])
+            keyboard.append([InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")])
             await _safe_edit(
                 query,
                 "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
@@ -332,6 +335,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === РЕФЕРАЛЬНАЯ ПРОГРАММА ===
         if query.data == "ref_program":
             user_id = query.from_user.id
+            completed = await asyncio.to_thread(db.count_user_completed_orders, user_id)
+            if completed < 1:
+                await query.answer("Реферальная программа доступна после первого пополнения", show_alert=True)
+                return
             ref_count = await asyncio.to_thread(db.get_referral_count, user_id)
             bonus_info = await asyncio.to_thread(db.get_bonus_info, user_id)
             balance = bonus_info["balance"]
@@ -475,7 +482,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "🔹 Какая комиссия сервиса?\n\n"
                 "Комиссия зависит от региона и суммы:\n\n"
-                "🇺🇸 США — 15% (до $50) / 12% ($100–$300) / 11% ($500)\n"
+                "🇺🇸 США — 15% (до $50) / 12% ($51–$300) / 11% (свыше $300)\n"
                 "🇹🇷 Турция — 12%\n"
                 "🇰🇿 Казахстан — 20% (до 10к) / 15% (10к–30к) / 12% (свыше 30к)\n"
                 "🇦🇪 ОАЭ Premium — 15%\n"
@@ -1662,8 +1669,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 Отправить", callback_data=f"review_system_{order_num}_{rating}")],
                     [InlineKeyboardButton("✍️ Написать свой отзыв", callback_data=f"review_custom_{order_num}_{rating}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data=f"review_back_{order_num}")],
                 ]),
                 parse_mode="HTML"
+            )
+
+        elif query.data.startswith("review_back_"):
+            order_num = query.data.replace("review_back_", "")
+            user_id = query.from_user.id
+            if user_id in AWAITING_REVIEW_COMMENT:
+                del AWAITING_REVIEW_COMMENT[user_id]
+            await query.edit_message_text(
+                f"📦 <b>Заказ {order_num}</b>\n\n"
+                f"⭐ Оцените качество нашего сервиса:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rating_keyboard(order_num))
             )
 
         elif query.data.startswith("review_system_"):
@@ -2077,12 +2097,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if text == "📋 Заказы" or text == "👤 Личный кабинет":
+            user_id = update.message.from_user.id
+            completed = await asyncio.to_thread(db.count_user_completed_orders, user_id)
             keyboard = [
                 [InlineKeyboardButton("📋 Мои заказы", callback_data="my_orders")],
                 [InlineKeyboardButton("📝 Мои отзывы", callback_data="my_reviews")],
-                [InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")],
-                [InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")],
             ]
+            if completed >= 1:
+                keyboard.append([InlineKeyboardButton("🤝 Реферальная программа", callback_data="ref_program")])
+            keyboard.append([InlineKeyboardButton("🎁 Акции и бонусы", callback_data="bonuses")])
             await update.message.reply_text(
                 "👤 <b>Личный кабинет</b>\n\nВыберите раздел:",
                 parse_mode="HTML",
