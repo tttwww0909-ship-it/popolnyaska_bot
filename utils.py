@@ -180,7 +180,10 @@ _EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
 
 
 def validate_email(email: str) -> bool:
-    """Проверяет формат email"""
+    """Проверяет формат и длину email"""
+    from config import MAX_EMAIL_LENGTH
+    if not email or len(email) > MAX_EMAIL_LENGTH:
+        return False
     return bool(_EMAIL_RE.match(email))
 
 

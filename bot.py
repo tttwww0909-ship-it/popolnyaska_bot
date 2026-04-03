@@ -44,10 +44,19 @@ def _build_app():
     return app
 
 
+_MAX_WEBHOOK_BODY = 65536  # 64 KB максимум для webhook-запроса
+
+
 async def _cryptopay_webhook_handler(request: web.Request) -> web.Response:
     """HTTP-обработчик вебхуков от CryptoPay."""
     try:
+        if request.content_length and request.content_length > _MAX_WEBHOOK_BODY:
+            logger.warning("CryptoPay webhook: body too large (%s bytes)", request.content_length)
+            return web.Response(status=413, text="Payload too large")
         body = await request.read()
+        if len(body) > _MAX_WEBHOOK_BODY:
+            logger.warning("CryptoPay webhook: body too large (%s bytes)", len(body))
+            return web.Response(status=413, text="Payload too large")
         signature = request.headers.get("crypto-pay-api-signature", "")
 
         if _cryptopay and not _cryptopay.verify_webhook(body, signature):
@@ -91,6 +100,8 @@ async def _run_with_webhook():
     try:
         await asyncio.Event().wait()
     finally:
+        if _cryptopay:
+            await _cryptopay.close()
         await updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()

@@ -196,7 +196,14 @@ def update_stats_sheet():
 
 
 def add_order_to_sheet(order_data):
-    """Добавляет заказ в БД (авторитетный источник) и в Google Sheets (best-effort)"""
+    """Добавляет заказ в БД (авторитетный источник) и в Google Sheets (best-effort).
+
+    Returns:
+        (True, True)  — БД и Sheets ОК
+        (True, False) — БД ОК, Sheets упал (нужен алерт админу)
+        (False, False) — БД упала
+    """
+    sheets_ok = False
     try:
         # 1. Сначала пишем в SQLite (авторитетный источник)
         user_id = db.add_user(
@@ -206,7 +213,7 @@ def add_order_to_sheet(order_data):
         )
         if not user_id:
             logger.error("Ошибка добавления пользователя в БД")
-            return False
+            return False, False
 
         order_id = db.add_order(
             order_number=order_data["number"],
@@ -219,7 +226,7 @@ def add_order_to_sheet(order_data):
         )
         if not order_id:
             logger.error("Ошибка добавления заказа в БД")
-            return False
+            return False, False
 
         logger.info(f"✅ Заказ {order_data['number']} добавлен в БД")
 
@@ -245,6 +252,7 @@ def add_order_to_sheet(order_data):
                         if added_cell:
                             db.set_order_sheets_row(order_data["number"], added_cell.row)
                         logger.info(f"Заказ {order_data['number']} добавлен в Google Sheets")
+                        sheets_ok = True
                         break
                     except gspread.exceptions.APIError as e:
                         if _attempt < 2:
@@ -263,11 +271,11 @@ def add_order_to_sheet(order_data):
             logger.warning(f"⚠️ Google Sheets недоступен, заказ сохранён только в БД: {e}")
 
         _run_stats_update()
-        return True
+        return True, sheets_ok
 
     except Exception as e:
         logger.error(f"Ошибка при добавлении заказа: {e}")
-        return False
+        return False, False
 
 
 def update_order_amount_in_sheet(order_number, new_amount_rub):

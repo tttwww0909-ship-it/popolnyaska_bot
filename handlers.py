@@ -16,6 +16,7 @@ from config import (
     CRYPTOPAY_TOKEN, REVIEWS_CHAT_ID,
     GIFT_CARD_LABELS, REGION_DESCRIPTIONS, GIFT_CARD_HINTS,
     REF_THRESHOLD, FIXED_PARTNER_BONUS, MAX_BONUS_PAYMENT, REFERRAL_RATES,
+    VIP_DISCOUNT, VIP_THRESHOLD, MAX_EMAIL_LENGTH, MAX_REVIEW_LENGTH,
 )
 from utils import (
     fmt, esc, get_rate, get_usdt_rate, get_kz_commission, get_us_commission, smart_round, check_spam, mark_order_created, generate_order,
@@ -72,6 +73,27 @@ async def _get_user_orders_msg(telegram_id: int) -> tuple:
     if len(orders) > 10:
         msg += f"<i>...и ещё {len(orders) - 10} заказ(ов)</i>"
     return True, msg
+
+
+def _get_order_data(context, order_number: str) -> dict | None:
+    """Gets order data from context.user_data or ORDER_INFO_MAP (restart fallback)."""
+    order = context.user_data.get("order")
+    if order and order.get("number") == order_number:
+        return order
+    info = ORDER_INFO_MAP.get(order_number)
+    if info:
+        return {
+            "number": order_number,
+            "rub": info["rub"],
+            "tariff": info.get("tariff", ""),
+            "region": info.get("region", "KZ"),
+            "service": info.get("service", ""),
+            "rub_original": info.get("rub_original", info["rub"]),
+            "commission": info.get("commission", 0),
+            "partner_pct": info.get("partner_pct", 0),
+            "ref_discount": info.get("ref_discount", 0),
+        }
+    return None
 
 
 async def _proceed_vip_crypto(query, context, order_number: str, rub_final: int):
@@ -163,11 +185,8 @@ async def _credit_partner_bonus(bot, order_number: str, buyer_id: int):
         amount_rub = order_db.get("amount_rub", 0)
         partner_pct = 0.02  # fallback
     else:
-        # Считаем бонус от суммы без учёта списанных баллов
-        bonus_used = order_info.get("bonus_used", 0)
-        amount_rub = order_info.get("rub", 0) + bonus_used  # «реальные деньги» = rub (после списания)
-        # Но партнёр получает % только от «живых» денег (без баллов)
-        amount_rub = order_info.get("rub", 0)
+        # Бонус партнёру считается от полной стоимости заказа (до списания баллов)
+        amount_rub = order_info.get("rub", 0) + order_info.get("bonus_used", 0)
         partner_pct = order_info.get("partner_pct", 0)
 
     if partner_pct <= 0:
@@ -514,7 +533,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "  — Bybit (перевод по UID)\n"
                 "  — CryptoPay (@CryptoBot)\n"
                 "  — Telegram Wallet (TRC20)\n\n"
-                "⚠️ Для заказов свыше 8 500 ₽ доступна только оплата криптой.",
+                f"⚠️ Для заказов свыше {fmt(VIP_THRESHOLD)} ₽ доступна только оплата криптой.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад к FAQ", callback_data="back_to_faq")]])
             )
             return
@@ -563,7 +582,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from config import BYBIT_UID, TRC20_ADDRESS
             await query.edit_message_text(
                 "💳 <b>Как оплатить криптой (USDT)</b>\n\n"
-                "Оплата заказов от 8 500 ₽ производится в USDT.\n\n"
+                f"Оплата заказов от {fmt(VIP_THRESHOLD)} ₽ производится в USDT.\n\n"
                 "➕ <b>Способ 1: CryptoPay (автоматически)</b>\n"
                 "1. Нажмите кнопку «⚡ Оплатить через CryptoPay»\n"
                 "2. Оплата подтверждается мгновенно — скриншот не нужен\n\n"
@@ -589,7 +608,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from config import BYBIT_UID, TRC20_ADDRESS
             await query.edit_message_text(
                 "💳 <b>Как оплатить криптой (USDT)</b>\n\n"
-                "Оплата заказов от 8 500 ₽ производится в USDT.\n\n"
+                f"Оплата заказов от {fmt(VIP_THRESHOLD)} ₽ производится в USDT.\n\n"
                 "➕ <b>Способ 1: CryptoPay (автоматически)</b>\n"
                 "1. Нажмите кнопку «⚡ Оплатить через CryptoPay»\n"
                 "2. Оплата подтверждается мгновенно — скриншот не нужен\n\n"
@@ -639,12 +658,15 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query.data == "back_to_vip_promo":
             order_number = context.user_data.get("vip_order_number")
-            order = context.user_data.get("order")
-            if not order_number or not order:
+            if not order_number:
+                await query.answer("Сессия истекла. Начните заказ заново.", show_alert=True)
+                return
+            order = _get_order_data(context, order_number)
+            if not order:
                 await query.answer("Сессия истекла. Начните заказ заново.", show_alert=True)
                 return
             usdt_rate = await asyncio.to_thread(get_usdt_rate)
-            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * (1 - VIP_DISCOUNT)))
             saving = order["rub"] - rub_discounted
             usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
             await query.edit_message_text(
@@ -899,9 +921,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "region": order.get("region", "KZ")
                 }
 
-                if not await asyncio.to_thread(add_order_to_sheet, order_data):
+                db_ok, sheets_ok = await asyncio.to_thread(add_order_to_sheet, order_data)
+                if not db_ok:
                     await query.edit_message_text("❌ Ошибка сохранения заказа. Попробуйте позже.")
                     return
+                if not sheets_ok:
+                    try:
+                        await context.bot.send_message(
+                            ADMIN_ID,
+                            f"⚠️ Заказ <b>{order_number}</b> сохранён в БД, но <b>НЕ</b> в Google Sheets!\n"
+                            f"Проверьте доступ к таблице.",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
 
                 mark_order_created(user_id)
 
@@ -926,9 +959,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
                 context.user_data["current_order_number"] = order_number
 
-                if order["rub"] > 8500:
+                if order["rub"] > VIP_THRESHOLD:
                     # Промо-экран для крупных заказов (Вариант Б)
-                    rub_discounted = round(order["rub"] * 0.98)
+                    rub_discounted = round(order["rub"] * (1 - VIP_DISCOUNT))
                     saving = order["rub"] - rub_discounted
                     usdt_suffix = f" (~{round(rub_discounted / usdt_rate, 2)} USDT)" if usdt_rate else ""
                     await query.edit_message_text(
@@ -938,7 +971,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     context.user_data["rub_discounted"] = rub_discounted
                     context.user_data["vip_order_number"] = order_number
-                    logger.info(f"Заказ {order_number} — промо VIP-экран (>{8500}₽)")
+                    logger.info(f"Заказ {order_number} — промо VIP-экран (>{VIP_THRESHOLD}₽)")
                 else:
                     pay_btns = payment_buttons(order_number, is_large_order=False)
                     # Предложение списания баллов
@@ -971,7 +1004,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === СПИСАНИЕ БАЛЛОВ ===
         elif query.data.startswith("use_bonus_"):
             order_number = query.data.replace("use_bonus_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
@@ -1005,7 +1038,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount_usdt = round(new_rub / usdt_rate, 2) if usdt_rate else None
             context.user_data["amount_usdt"] = amount_usdt
 
-            pay_btns = payment_buttons(order_number, is_large_order=(new_rub > 8500))
+            pay_btns = payment_buttons(order_number, is_large_order=(new_rub > VIP_THRESHOLD))
             usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
             await query.edit_message_text(
                 f"✅ Списано <b>{fmt(usable)}</b> баллов!\n\n"
@@ -1021,7 +1054,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ОПЛАТА ЮMONEY ===
         elif query.data.startswith("pay_yoomoney_"):
             order_number = query.data.replace("pay_yoomoney_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
@@ -1054,7 +1087,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ОПЛАТА OZON ===
         elif query.data.startswith("pay_ozon_"):
             order_number = query.data.replace("pay_ozon_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
@@ -1108,12 +1141,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === ОПЛАТА КРИПТОЙ ===
         elif query.data.startswith("vip_crypto_"):
             order_number = query.data.replace("vip_crypto_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
-            # Применяем скидку 2% к сумме заказа
-            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            # Применяем VIP-скидку к сумме заказа
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * (1 - VIP_DISCOUNT)))
             context.user_data["rub_discounted"] = rub_discounted
 
             # Проверяем бонусные баллы
@@ -1149,12 +1182,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data.startswith("use_bonus_vip_"):
             order_number = query.data.replace("use_bonus_vip_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
             user_id = query.from_user.id
-            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * (1 - VIP_DISCOUNT)))
             bonus_balance = await asyncio.to_thread(db.get_bonus_balance, user_id)
             max_bonus = int(rub_discounted * MAX_BONUS_PAYMENT)
             usable = min(int(bonus_balance), max_bonus)
@@ -1177,16 +1210,16 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data.startswith("skip_bonus_vip_"):
             order_number = query.data.replace("skip_bonus_vip_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
-            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * 0.98))
+            rub_discounted = context.user_data.get("rub_discounted", round(order["rub"] * (1 - VIP_DISCOUNT)))
             await _proceed_vip_crypto(query, context, order_number, rub_discounted)
 
         elif query.data.startswith("pay_crypto_") and not query.data.startswith("pay_crypto_manual_"):
             order_number = query.data.replace("pay_crypto_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
@@ -1225,7 +1258,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === РУЧНАЯ КРИПТО-ОПЛАТА (Bybit UID) — fallback от CryptoPay ===
         elif query.data.startswith("pay_crypto_manual_"):
             order_number = query.data.replace("pay_crypto_manual_", "")
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             if not order:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Создайте новый заказ.")
                 return
@@ -1255,7 +1288,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pay_label = "OZON банк"
 
             user_id = query.from_user.id
-            order = context.user_data.get("order")
             AWAITING_SCREENSHOT[user_id] = order_number
 
             order_info = ORDER_INFO_MAP.get(order_number, {})
@@ -1265,7 +1297,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount_usdt = context.user_data.get("amount_usdt", 0)
                 sum_display = f"<b>{amount_usdt} USDT</b>"
             else:
-                amount_rub = order["rub"] if order else 0
+                amount_rub = order_info.get("rub", 0)
                 sum_display = f"<b>{fmt(amount_rub)} ₽</b>"
 
             await query.edit_message_text(
@@ -1299,7 +1331,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "  — Bybit (перевод по UID)\n"
                 "  — CryptoPay (@CryptoBot)\n"
                 "  — Telegram Wallet (TRC20)\n\n"
-                "⚠️ Для заказов свыше 8 500 ₽ доступна только оплата криптой.\n\n"
+                f"⚠️ Для заказов свыше {fmt(VIP_THRESHOLD)} ₽ доступна только оплата криптой.\n\n"
                 "⏱ <b>Сроки:</b>\n"
                 "🇰🇿 Казахстан — до 30 минут | 🎁 Gift Card — до 15 минут\n\n"
                 "❓ <b>Проблемы с оплатой?</b>\n"
@@ -1314,21 +1346,10 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not order_number:
                 await query.edit_message_text("⚠️ Данные заказа потеряны. Начните снова.")
                 return
-            order = context.user_data.get("order")
+            order = _get_order_data(context, order_number)
             amount_usdt = context.user_data.get("amount_usdt", 0)
             if order:
-                if order['rub'] > 8500:
-                    pay_buttons = [
-                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
-                    ]
-                else:
-                    pay_buttons = [
-                        [InlineKeyboardButton("💳 ЮMoney", callback_data=f"pay_yoomoney_{order_number}")],
-                        [InlineKeyboardButton("💳 OZON банк", callback_data=f"pay_ozon_{order_number}")],
-                        [InlineKeyboardButton("💎 Криптой (USDT)", callback_data=f"pay_crypto_{order_number}")],
-                        [InlineKeyboardButton("❓ FAQ", callback_data="help_payment")]
-                    ]
+                pay_btns = payment_buttons(order_number, is_large_order=(order['rub'] > VIP_THRESHOLD))
                 usdt_suffix = f" (~{amount_usdt} USDT)" if amount_usdt else ""
                 await query.edit_message_text(
                     f"✅ Заявка сформирована!\n\n"
@@ -1336,7 +1357,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Тариф: <b>{order['tariff']}</b>\n"
                     f"Сумма: <b>{fmt(order['rub'])} ₽</b>{usdt_suffix}\n\n"
                     f"Выберите способ оплаты:",
-                    reply_markup=InlineKeyboardMarkup(pay_buttons),
+                    reply_markup=InlineKeyboardMarkup(pay_btns),
                     parse_mode="HTML"
                 )
             else:
@@ -2150,6 +2171,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === КОММЕНТАРИЙ К ОТЗЫВУ ===
         if user_id in AWAITING_REVIEW_COMMENT:
+            if len(text) > MAX_REVIEW_LENGTH:
+                await update.message.reply_text(
+                    f"❌ Комментарий слишком длинный ({len(text)} символов). "
+                    f"Максимум — {MAX_REVIEW_LENGTH}. Пожалуйста, сократите текст:"
+                )
+                return
             review_data = AWAITING_REVIEW_COMMENT.get(user_id)
             order_num = review_data["order_num"]
             rating = review_data["rating"]

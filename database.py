@@ -678,10 +678,7 @@ class Database:
             with conn:
                 c = conn.cursor()
                 c.execute(
-                    "UPDATE counters SET value = value + 1 WHERE name = 'order_number'"
-                )
-                c.execute(
-                    "SELECT value FROM counters WHERE name = 'order_number'"
+                    "UPDATE counters SET value = value + 1 WHERE name = 'order_number' RETURNING value"
                 )
                 row = c.fetchone()
                 if row:

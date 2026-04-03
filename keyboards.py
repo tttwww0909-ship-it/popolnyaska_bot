@@ -4,7 +4,7 @@
 
 from telegram import InlineKeyboardButton
 
-from config import BYBIT_UID, TRC20_ADDRESS, CRYPTOPAY_TOKEN
+from config import BYBIT_UID, TRC20_ADDRESS, CRYPTOPAY_TOKEN, VIP_DISCOUNT, VIP_THRESHOLD
 from utils import fmt
 
 
@@ -86,10 +86,10 @@ def vip_promo_text(order_number: str, saving: int, rub_discounted: int, usdt_suf
     """Текст VIP-промо для крупных заказов"""
     return (
         f"💎 <b>Крупный заказ — особые условия!</b>\n\n"
-        f"Сумма вашего заказа превышает 8 500 ₽. Для обеспечения максимальной "
+        f"Сумма вашего заказа превышает {fmt(VIP_THRESHOLD)} ₽. Для обеспечения максимальной "
         f"безопасности и скорости обработки крупные платежи принимаются в USDT.\n\n"
         f"<b>Ваши преимущества:</b>\n"
-        f"✅ Скидка 2% — вы экономите <b>{fmt(saving)} ₽</b>\n"
+        f"✅ Скидка {int(VIP_DISCOUNT * 100)}% — вы экономите <b>{fmt(saving)} ₽</b>\n"
         f"✅ Итоговая сумма: <b>{fmt(rub_discounted)} ₽</b>{usdt_suffix}\n"
         f"✅ Приоритетная выдача кода\n"
         f"✅ Отсутствие рисков блокировки банком\n\n"
@@ -101,7 +101,7 @@ def vip_promo_text(order_number: str, saving: int, rub_discounted: int, usdt_suf
 def vip_promo_keyboard(order_number: str):
     """Клавиатура VIP-промо"""
     return [
-        [InlineKeyboardButton("💎 Оплатить криптой (−2%)", callback_data=f"vip_crypto_{order_number}")],
+        [InlineKeyboardButton(f"💎 Оплатить криптой (−{int(VIP_DISCOUNT * 100)}%)", callback_data=f"vip_crypto_{order_number}")],
         [InlineKeyboardButton("📞 Связаться с оператором", url="https://t.me/popolnyaska_halper")],
         [InlineKeyboardButton("❌ Отказаться от заказа", callback_data=f"vip_decline_{order_number}")],
     ]
@@ -109,7 +109,7 @@ def vip_promo_keyboard(order_number: str):
 
 USDT_GUIDE_TEXT = (
     "💳 <b>Как оплатить криптой (USDT)</b>\n\n"
-    "Оплата заказов от 8 500 ₽ производится в USDT.\n\n"
+    f"Оплата заказов от {fmt(VIP_THRESHOLD)} ₽ производится в USDT.\n\n"
     "➕ <b>Способ 1: CryptoPay (автоматически)</b>\n"
     "1. Нажмите кнопку «⚡ Оплатить через CryptoPay»\n"
     "2. Оплата подтверждается мгновенно — скриншот не нужен\n\n"
